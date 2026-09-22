@@ -1,0 +1,36 @@
+{
+  "calibration_points": [
+    {
+      "y2": 256.61,
+      "distance_m": 9.0
+    },
+    {
+      "y2": 266.0,
+      "distance_m": 8.0
+    },
+    {
+      "y2": 278.16,
+      "distance_m": 7.0
+    },
+    {
+      "y2": 288.0,
+      "distance_m": 6.0
+    },
+    {
+      "y2": 309.71,
+      "distance_m": 5.0
+    },
+    {
+      "y2": 332.23,
+      "distance_m": 4.0
+    },
+    {
+      "y2": 364.98,
+      "distance_m": 3.0
+    },
+    {
+      "y2": 458.62,
+      "distance_m": 2.0
+    }
+  ]
+}

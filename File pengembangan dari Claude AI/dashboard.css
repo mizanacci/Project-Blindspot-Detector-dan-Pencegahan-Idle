@@ -1,0 +1,136 @@
+/* ============================================================
+   AWAS Dashboard — desain HMI industrial untuk kabin alat berat.
+   v2: + panel status mesin/idle/GPS, sengaja netral (BUKAN merah/
+   kuning/hijau) supaya operator tidak menyamakan urgensinya dengan
+   alarm keselamatan blind spot.
+   ============================================================ */
+
+:root {
+  --bg-primary: #1C1E22;
+  --bg-panel: #24272C;
+  --border-subtle: #383C42;
+  --text-primary: #EDEEF0;
+  --text-secondary: #8B9099;
+  --accent: #F5A623;
+
+  --status-aman: #1F9D55;
+  --status-siaga: #E0A400;
+  --status-bahaya: #E0303D;
+
+  --font-display: "IBM Plex Sans", -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "IBM Plex Mono", "SF Mono", Consolas, monospace;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  height: 100%;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: var(--font-display);
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+body { display: flex; flex-direction: column; }
+
+/* ---------- Topbar ---------- */
+.topbar {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 16px 28px; border-bottom: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+.brand-mark { font-weight: 700; font-size: 22px; letter-spacing: 0.04em; color: var(--accent); }
+.brand-sub { font-size: 13px; color: var(--text-secondary); margin-left: 14px; padding-left: 14px; border-left: 1px solid var(--border-subtle); }
+.topbar-meta { display: flex; align-items: center; gap: 8px; font-family: var(--font-mono); font-size: 13px; color: var(--text-secondary); }
+.meta-divider { opacity: 0.5; }
+.live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--status-aman); animation: pulse 2s infinite; }
+@keyframes pulse {
+  0%   { box-shadow: 0 0 0 0 rgba(31, 157, 85, 0.55); }
+  70%  { box-shadow: 0 0 0 7px rgba(31, 157, 85, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(31, 157, 85, 0); }
+}
+
+/* ---------- Layout utama ---------- */
+.layout {
+  flex: 1; display: grid; grid-template-columns: 1.6fr 1fr;
+  gap: 20px; padding: 20px 28px 12px; min-height: 0;
+}
+
+.camera-panel { min-height: 0; }
+.camera-frame { position: relative; height: 100%; min-height: 200px; background: #000; border-radius: 3px; overflow: hidden; }
+.camera-frame img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.reticle-corner { position: absolute; width: 26px; height: 26px; border: 2px solid var(--accent); opacity: 0.8; pointer-events: none; }
+.reticle-corner.tl { top: 10px; left: 10px; border-right: none; border-bottom: none; }
+.reticle-corner.tr { top: 10px; right: 10px; border-left: none; border-bottom: none; }
+.reticle-corner.bl { bottom: 10px; left: 10px; border-right: none; border-top: none; }
+.reticle-corner.br { bottom: 10px; right: 10px; border-left: none; border-top: none; }
+.camera-tag { position: absolute; bottom: 12px; right: 14px; font-family: var(--font-mono); font-size: 12px; color: rgba(237,238,240,0.65); background: rgba(0,0,0,0.45); padding: 3px 8px; border-radius: 2px; letter-spacing: 0.05em; }
+
+/* ---------- Panel status blind spot (alarm keselamatan) ---------- */
+.status-panel {
+  background: var(--status-aman); border-radius: 3px; padding: 18px 22px;
+  display: flex; flex-direction: column; color: #FFFFFF; height: 100%;
+  transition: background-color 0.35s ease; min-height: 0;
+}
+.status-panel.siaga { background: var(--status-siaga); color: #1A1400; }
+.status-panel.bahaya { background: var(--status-bahaya); color: #FFFFFF; }
+.status-word { font-size: 40px; font-weight: 700; line-height: 1; letter-spacing: -0.01em; }
+.status-sub { font-size: 13px; margin-top: 6px; opacity: 0.82; }
+.metrics { margin-top: 16px; display: flex; flex-direction: column; gap: 10px; flex: 1; }
+.metric { display: flex; flex-direction: column; gap: 2px; border-top: 1px solid rgba(255,255,255,0.22); padding-top: 7px; }
+.status-panel.siaga .metric { border-top-color: rgba(26,20,0,0.2); }
+.metric-label { font-size: 11px; letter-spacing: 0.03em; opacity: 0.78; }
+.metric-value { font-family: var(--font-mono); font-size: 22px; font-weight: 600; }
+
+/* ---------- Panel sensor tambahan (mesin/idle/GPS) -- NETRAL,
+   sengaja tidak dibuat traffic-light merah/kuning/hijau seperti
+   status-panel di atas, supaya urgensinya jelas beda kelas. ---------- */
+.sensor-panel {
+  margin: 0 28px 16px; background: var(--bg-panel);
+  border: 1px solid var(--border-subtle); border-radius: 3px;
+  padding: 14px 20px; flex-shrink: 0;
+}
+.sensor-panel-header {
+  display: flex; justify-content: space-between; align-items: baseline;
+  margin-bottom: 10px;
+}
+.sensor-panel-title {
+  font-size: 12px; font-weight: 600; letter-spacing: 0.06em;
+  color: var(--text-secondary);
+}
+.sensor-panel-sub {
+  font-family: var(--font-mono); font-size: 12px; color: var(--text-secondary);
+}
+.sensor-metrics {
+  display: grid; grid-template-columns: repeat(5, 1fr); gap: 16px;
+}
+.sensor-metric { display: flex; flex-direction: column; gap: 3px; }
+.metric-value-sm {
+  font-family: var(--font-mono); font-size: 18px; font-weight: 600;
+  color: var(--text-primary);
+}
+
+/* ---------- Riwayat / event log ---------- */
+.event-log {
+  border-top: 1px solid var(--border-subtle); padding: 12px 28px;
+  display: flex; align-items: center; gap: 22px;
+  font-family: var(--font-mono); font-size: 12px; color: var(--text-secondary);
+  overflow-x: auto; white-space: nowrap; flex-shrink: 0;
+}
+.event-log-label { color: var(--text-primary); font-family: var(--font-display); font-weight: 600; font-size: 12px; letter-spacing: 0.05em; flex-shrink: 0; }
+.event-item { flex-shrink: 0; }
+.event-item.bahaya { color: var(--status-bahaya); }
+.event-item.siaga { color: var(--status-siaga); }
+.event-item.aman { color: var(--status-aman); }
+.event-empty { opacity: 0.6; }
+
+/* ---------- Responsif untuk layar LCD kecil (rencana pengembangan) ---------- */
+@media (max-width: 900px) {
+  .layout { grid-template-columns: 1fr; }
+  .camera-frame { min-height: 200px; }
+  .status-word { font-size: 40px; }
+  .metric-value { font-size: 22px; }
+  .sensor-metrics { grid-template-columns: repeat(2, 1fr); }
+  .brand-sub { display: none; }
+}

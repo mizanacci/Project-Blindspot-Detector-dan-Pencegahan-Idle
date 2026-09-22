@@ -1,0 +1,9 @@
+ultralytics
+opencv-python
+gpiozero
+flask
+numpy
+scikit-fuzzy
+pynmea2
+pyserial
+smbus2

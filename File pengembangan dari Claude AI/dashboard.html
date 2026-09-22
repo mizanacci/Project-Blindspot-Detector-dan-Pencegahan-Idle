@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AWAS — Deteksi Blind Spot</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}">
+</head>
+<body>
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">AWAS</span>
+      <span class="brand-sub">Deteksi Blind Spot &middot; Alat Berat</span>
+    </div>
+    <div class="topbar-meta">
+      <span class="live-dot" id="live-dot"></span>
+      <span id="live-label">live</span>
+      <span class="meta-divider">&middot;</span>
+      <span id="clock">--:--:--</span>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="camera-panel">
+      <div class="camera-frame">
+        <img src="/video_feed" alt="Live feed kamera" id="camera-feed">
+        <span class="reticle-corner tl"></span>
+        <span class="reticle-corner tr"></span>
+        <span class="reticle-corner bl"></span>
+        <span class="reticle-corner br"></span>
+        <span class="camera-tag">CAM-01</span>
+      </div>
+    </section>
+
+    <aside class="status-panel" id="status-panel">
+      <div class="status-main">
+        <div class="status-word" id="status-word">AMAN</div>
+        <div class="status-sub" id="status-sub">Area kerja aman dipantau</div>
+      </div>
+
+      <div class="metrics">
+        <div class="metric">
+          <span class="metric-label">Jarak terdekat</span>
+          <span class="metric-value" id="metric-jarak">&mdash;&nbsp;m</span>
+        </div>
+        <div class="metric">
+          <span class="metric-label">Durasi di zona</span>
+          <span class="metric-value" id="metric-durasi">--:--</span>
+        </div>
+        <div class="metric">
+          <span class="metric-label">Orang terdeteksi</span>
+          <span class="metric-value" id="metric-orang">0</span>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <!-- Panel BARU: status mesin/idle/GPS -- sengaja terpisah dari
+       status-panel di atas (alarm keselamatan), bukan dilebur jadi satu.
+       Netral/informasional, bukan traffic-light merah/kuning/hijau. -->
+  <section class="sensor-panel" id="sensor-panel">
+    <div class="sensor-panel-header">
+      <span class="sensor-panel-title">STATUS MESIN &amp; LOKASI</span>
+      <span class="sensor-panel-sub" id="sensor-last-update">Menunggu data sensor&hellip;</span>
+    </div>
+    <div class="sensor-metrics">
+      <div class="sensor-metric">
+        <span class="metric-label">Status mesin</span>
+        <span class="metric-value-sm" id="sensor-mesin">&mdash;</span>
+      </div>
+      <div class="sensor-metric">
+        <span class="metric-label">Status idle</span>
+        <span class="metric-value-sm" id="sensor-idle">&mdash;</span>
+      </div>
+      <div class="sensor-metric">
+        <span class="metric-label">Durasi idle</span>
+        <span class="metric-value-sm" id="sensor-durasi-idle">--:--</span>
+      </div>
+      <div class="sensor-metric">
+        <span class="metric-label">Getaran</span>
+        <span class="metric-value-sm" id="sensor-getaran">&mdash; g</span>
+      </div>
+      <div class="sensor-metric">
+        <span class="metric-label">GPS</span>
+        <span class="metric-value-sm" id="sensor-gps">Tidak ada fix</span>
+      </div>
+    </div>
+  </section>
+
+  <footer class="event-log">
+    <span class="event-log-label">RIWAYAT</span>
+    <div class="event-list" id="event-list">
+      <span class="event-empty">Belum ada perubahan status</span>
+    </div>
+  </footer>
+
+  <script src="{{ url_for('static', filename='dashboard.js') }}"></script>
+</body>
+</html>
