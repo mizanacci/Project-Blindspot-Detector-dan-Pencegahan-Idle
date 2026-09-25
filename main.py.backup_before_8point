@@ -1,0 +1,178 @@
+"""
+main.py
+Loop utama: baca kamera -> deteksi orang (YOLO) -> lacak tiap orang
+(tracker) -> estimasi jarak & durasi per orang -> fuzzy logic urgensi
+tertinggi di antara semua orang -> stabilisasi status (anti false-alarm)
+-> LED/buzzer -> log CSV.
+
+SEBELUM DIJALANKAN:
+1. pip install -r requirements.txt --break-system-packages
+2. Pasang kamera di posisi & sudut FINAL, lalu jalankan calibrate_zone.py
+   sampai zone_config.json terbentuk
+3. Sesuaikan nomor pin GPIO di bawah dengan wiring kamu
+
+v2: sekarang melacak SEMUA orang di frame (bukan cuma yang paling dekat)
+lewat tracker.py, dan status alarm distabilkan lewat StatusStabilizer di
+fuzzy_engine.py supaya tidak kedip-kedip akibat flicker deteksi sesaat.
+"""
+
+import time
+import json
+import csv
+from datetime import datetime
+
+import cv2
+from gpiozero import Buzzer, LED
+
+from vision import PersonDetector
+from tracker import SimpleTracker
+from fuzzy_engine import evaluate_urgency, StatusStabilizer
+
+BUZZER_PIN = 22
+LED_HIJAU_PIN = 23     # status: aman
+LED_KUNING_PIN = 24    # status: siaga
+LED_MERAH_PIN = 25     # status: bahaya
+
+LOG_FILE = "log_blindspot.csv"
+ZONE_CONFIG_FILE = "zone_config.json"
+
+# Lewati N-1 frame di antara tiap inference YOLO -- optimasi performa.
+# 1 = proses tiap frame (paling akurat, paling berat). Naikkan ke 2-3
+# kalau FPS di Pi 4 kamu masih terasa berat setelah pakai model NCNN.
+FRAME_SKIP = 1
+
+
+def load_zone_config():
+    with open(ZONE_CONFIG_FILE) as f:
+        return json.load(f)
+
+
+def estimate_distance(bbox_bottom_y, cfg):
+    """Interpolasi linear jarak (meter) dari posisi piksel y hasil kalibrasi."""
+    y_waspada, y_bahaya = cfg['y_waspada'], cfg['y_bahaya']
+    jarak_waspada, jarak_bahaya = cfg['jarak_waspada_m'], cfg['jarak_bahaya_m']
+
+    if y_bahaya == y_waspada:
+        return jarak_waspada
+
+    slope = (jarak_bahaya - jarak_waspada) / (y_bahaya - y_waspada)
+    jarak = jarak_waspada + slope * (bbox_bottom_y - y_waspada)
+    return max(0.5, min(15.0, jarak))
+
+
+def setup_log():
+    try:
+        with open(LOG_FILE, 'r') as f:
+            kosong = (f.read(1) == '')
+    except FileNotFoundError:
+        kosong = True
+    if kosong:
+        with open(LOG_FILE, 'w', newline='') as f:
+            csv.writer(f).writerow([
+                'timestamp', 'jumlah_orang', 'jarak_terdekat_m',
+                'durasi_terlama_s', 'skor_urgensi', 'status_mentah',
+                'status_stabil'
+            ])
+
+
+def log_reading(row):
+    with open(LOG_FILE, 'a', newline='') as f:
+        csv.writer(f).writerow(row)
+
+
+def set_output(status, buzzer, led_hijau, led_kuning, led_merah):
+    led_hijau.off(); led_kuning.off(); led_merah.off(); buzzer.off()
+    if status == 'aman':
+        led_hijau.on()
+    elif status == 'siaga':
+        led_kuning.on()
+    else:
+        led_merah.on()
+        buzzer.on()
+
+
+def urgensi_paling_parah(tracks_aktif, cfg):
+    """
+    Hitung urgensi untuk SETIAP orang yang dilacak, lalu kembalikan yang
+    paling parah -- karena satu orang yang benar-benar dekat/lama itu
+    tetap harus memicu alarm, tidak boleh "dirata-rata" jadi kelihatan
+    aman gara-gara orang lain di frame sedang jauh.
+    """
+    if not tracks_aktif:
+        return 15.0, 0.0, 0.0, 'aman'
+
+    terparah = None
+    for tr in tracks_aktif:
+        jarak_m = estimate_distance(tr['y2'], cfg)
+        skor, label = evaluate_urgency(jarak_m, tr['durasi_s'])
+        if terparah is None or skor > terparah[0]:
+            terparah = (skor, jarak_m, tr['durasi_s'], label)
+
+    return terparah[1], terparah[2], terparah[0], terparah[3]
+
+
+def main():
+    cfg = load_zone_config()
+    detector = PersonDetector()
+    tracker = SimpleTracker()
+    stabilizer = StatusStabilizer()
+    cap = cv2.VideoCapture("/dev/video0", cv2.CAP_V4L2)
+
+    cap.set(cv2.CAP_PROP_FOURCC,
+            cv2.VideoWriter_fourcc(*"MJPG"))
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    cap.set(cv2.CAP_PROP_FPS, 30)
+    if not cap.isOpened():
+        print("Kamera tidak terdeteksi. Cek koneksi webcam.")
+        return
+
+    buzzer = Buzzer(BUZZER_PIN)
+    led_hijau = LED(LED_HIJAU_PIN)
+    led_kuning = LED(LED_KUNING_PIN)
+    led_merah = LED(LED_MERAH_PIN)
+
+    setup_log()
+    print("Sistem deteksi blind spot berjalan. Ctrl+C untuk berhenti.\n")
+
+    frame_ke = 0
+    orang_terdeteksi = []  # cache hasil deteksi terakhir, dipakai ulang saat frame di-skip
+
+    try:
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                print("Gagal membaca frame kamera, coba lagi...")
+                time.sleep(1)
+                continue
+
+            frame_ke += 1
+            if frame_ke % FRAME_SKIP == 0:
+                orang_terdeteksi = detector.detect_people(frame)
+
+            tracks_aktif = tracker.update(orang_terdeteksi)
+            jarak_m, durasi_s, skor, status_mentah = urgensi_paling_parah(tracks_aktif, cfg)
+            status_stabil = stabilizer.update(status_mentah)
+
+            set_output(status_stabil, buzzer, led_hijau, led_kuning, led_merah)
+
+            timestamp = datetime.now().isoformat(timespec='seconds')
+            print(f"[{timestamp}] orang={len(tracks_aktif)}  jarak_terdekat={jarak_m:5.1f}m  "
+                  f"durasi_terlama={durasi_s:5.1f}s  skor={skor:5.1f}  "
+                  f"mentah={status_mentah:7s} -> STABIL={status_stabil.upper()}")
+
+            log_reading([
+                timestamp, len(tracks_aktif), round(jarak_m, 1),
+                round(durasi_s, 1), round(skor, 1), status_mentah, status_stabil
+            ])
+
+    except KeyboardInterrupt:
+        print("\nDihentikan oleh pengguna.")
+    finally:
+        buzzer.off(); led_hijau.off(); led_kuning.off(); led_merah.off()
+        cap.release()
+        print("Semua output dimatikan. Log tersimpan di", LOG_FILE)
+
+
+if __name__ == '__main__':
+    main()
