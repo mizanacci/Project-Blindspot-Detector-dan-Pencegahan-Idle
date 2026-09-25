@@ -53,6 +53,8 @@ ZONE_CONFIG_FILE = "zone_config.json"
 # 1 = proses tiap frame (paling akurat, paling berat). Naikkan ke 2-3
 # kalau FPS di Pi 4 kamu masih terasa berat setelah pakai model NCNN.
 FRAME_SKIP = 1
+GPS_READ_TIMEOUT_S = 0.2
+GPS_MAX_LINES = 5
 
 
 def load_zone_config():
@@ -207,7 +209,11 @@ def main():
         sw420 = None
         print(f"SW-420 tidak tersedia: {exc}")
     try:
-        gps = GPSNeo6M(port="/dev/serial0", baud=9600)
+        gps = GPSNeo6M(
+            port="/dev/serial0",
+            baud=9600,
+            timeout=GPS_READ_TIMEOUT_S,
+        )
     except Exception as exc:
         gps = None
         print(f"GPS NEO-6M tidak tersedia: {exc}")
@@ -244,6 +250,7 @@ def main():
                 continue
 
             frame_ke += 1
+            state.update_frame(frame)
             if frame_ke % FRAME_SKIP == 0:
                 orang_terdeteksi = detector.detect_people(frame)
 
@@ -256,12 +263,11 @@ def main():
                 'durasi_idle_s': 0, 'getaran_g': 0.0
             })
             sw420_terdeteksi = sw420.baca_terdeteksi() if sw420 is not None else False
-            gps_lokasi = (gps.baca_lokasi() if gps is not None else {
+            gps_lokasi = (gps.baca_lokasi(maks_baris=GPS_MAX_LINES) if gps is not None else {
                 'fix': 0, 'lat': 0.0, 'lon': 0.0
             })
 
             set_output(status_stabil, buzzer, led_hijau, led_kuning, led_merah)
-            state.update_frame(frame)
             state.update_status(
                 status_stabil, jarak_m, durasi_s, skor, len(tracks_aktif)
             )
