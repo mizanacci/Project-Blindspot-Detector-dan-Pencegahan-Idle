@@ -37,6 +37,7 @@ import math
 AMBANG_MESIN_MATI = 0.030   # di bawah ini = tidak ada getaran berarti
 AMBANG_GERAK = 0.180        # di atas ini = jelas bergerak/beroperasi, bukan idle
 DURASI_PERINGATAN_S = 3 * 60  # 3 menit idle -> IDLE_LAMA
+BATAS_KEMIRINGAN_DERAJAT = 12.0
 
 MPU_ADDR = 0x68
 PWR_MGMT_1 = 0x6B
@@ -44,6 +45,10 @@ ACCEL_XOUT_H = 0x3B
 
 STATUS_MESIN_VALID = {"ON", "MATI", "TIDAK_PASTI"}
 STATUS_IDLE_VALID = {"AMAN", "IDLE", "IDLE_LAMA"}
+
+
+def _clip(value, minimum, maximum):
+    return max(minimum, min(maximum, value))
 
 
 class MPU6050Sensor:
@@ -80,7 +85,22 @@ class MPU6050Sensor:
         ax = self._read_word(ACCEL_XOUT_H) / 16384.0
         ay = self._read_word(ACCEL_XOUT_H + 2) / 16384.0
         az = self._read_word(ACCEL_XOUT_H + 4) / 16384.0
-        return math.sqrt(ax * ax + ay * ay + az * az)
+        return ax, ay, az, math.sqrt(ax * ax + ay * ay + az * az)
+
+    @staticmethod
+    def calculate_tilt_deg(ax, ay, az):
+        ax = float(ax)
+        ay = float(ay)
+        az = float(az)
+        tilt_x_deg = math.degrees(math.atan2(ay, math.sqrt(ax * ax + az * az)))
+        tilt_y_deg = math.degrees(math.atan2(ax, math.sqrt(ay * ay + az * az)))
+        return tilt_x_deg, tilt_y_deg
+
+    @staticmethod
+    def get_tilt_status(tilt_x_deg, tilt_y_deg, threshold_deg=BATAS_KEMIRINGAN_DERAJAT):
+        if abs(float(tilt_x_deg)) > threshold_deg or abs(float(tilt_y_deg)) > threshold_deg:
+            return "MIRING"
+        return "NORMAL"
 
     def baca_status(self):
         """
@@ -101,12 +121,22 @@ class MPU6050Sensor:
             if len(sampel) < 3:
                 sampel.append(self._baca_magnitude_g())
                 sampel.append(self._baca_magnitude_g())
-            rata_burst = sum(sampel) / len(sampel)
-            getaran_ac = max(abs(s - rata_burst) for s in sampel)
+
+            ax_values = [item[0] for item in sampel]
+            ay_values = [item[1] for item in sampel]
+            az_values = [item[2] for item in sampel]
+            mag_values = [item[3] for item in sampel]
+            rata_burst = sum(mag_values) / len(mag_values)
+            getaran_ac = max(abs(s - rata_burst) for s in mag_values)
+            ax_avg = sum(ax_values) / len(ax_values)
+            ay_avg = sum(ay_values) / len(ay_values)
+            az_avg = sum(az_values) / len(az_values)
+            tilt_x_deg, tilt_y_deg = self.calculate_tilt_deg(ax_avg, ay_avg, az_avg)
         except Exception:
             return {
                 "status_mesin": "TIDAK_PASTI", "status_idle": "AMAN",
                 "durasi_idle_s": 0, "getaran_g": 0.0,
+                "tilt_x_deg": 0.0, "tilt_y_deg": 0.0, "tilt_status": "NORMAL",
             }
 
         now = time.time()
@@ -125,12 +155,16 @@ class MPU6050Sensor:
             status_idle = "IDLE_LAMA" if durasi >= DURASI_PERINGATAN_S else "IDLE"
 
         durasi_idle_s = int(now - self._idle_mulai) if self._idle_mulai else 0
+        tilt_status = self.get_tilt_status(tilt_x_deg, tilt_y_deg)
 
         return {
             "status_mesin": status_mesin,
             "status_idle": status_idle,
             "durasi_idle_s": durasi_idle_s,
             "getaran_g": round(getaran_ac, 4),
+            "tilt_x_deg": round(_clip(float(tilt_x_deg), -90.0, 90.0), 1),
+            "tilt_y_deg": round(_clip(float(tilt_y_deg), -90.0, 90.0), 1),
+            "tilt_status": tilt_status,
         }
 
     def close(self):

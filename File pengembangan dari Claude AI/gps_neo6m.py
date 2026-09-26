@@ -81,12 +81,17 @@ class GPSNeo6M:
     @staticmethod
     def _ekstrak_fix(pesan):
         tipe = type(pesan).__name__
+        gps_qual = getattr(pesan, "gps_qual", None)
+        latitude = getattr(pesan, "latitude", None)
+        longitude = getattr(pesan, "longitude", None)
+        status = getattr(pesan, "status", None)
+
         if tipe == "GGA":
-            if pesan.gps_qual and int(pesan.gps_qual) > 0 and pesan.latitude and pesan.longitude:
-                return {"fix": 1, "lat": float(pesan.latitude), "lon": float(pesan.longitude)}
+            if gps_qual is not None and int(gps_qual) > 0 and latitude is not None and longitude is not None:
+                return {"fix": 1, "lat": float(latitude), "lon": float(longitude)}
         elif tipe == "RMC":
-            if pesan.status == "A" and pesan.latitude and pesan.longitude:
-                return {"fix": 1, "lat": float(pesan.latitude), "lon": float(pesan.longitude)}
+            if status == "A" and latitude is not None and longitude is not None:
+                return {"fix": 1, "lat": float(latitude), "lon": float(longitude)}
         return None
 
     def close(self):

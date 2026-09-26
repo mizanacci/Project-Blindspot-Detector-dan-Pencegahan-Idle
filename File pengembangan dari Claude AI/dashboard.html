@@ -9,6 +9,7 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}">
 </head>
 <body>
+  <div id="app-shell">
 
   <header class="topbar">
     <div class="brand">
@@ -22,6 +23,13 @@
       <span id="clock">--:--:--</span>
     </div>
   </header>
+
+  <div class="startup-banner" id="startup-banner">Sistem siap — menunggu operator menekan start</div>
+
+  <section class="startup-checklist" id="startup-checklist">
+    <div class="checklist-header">CHECKLIST STARTUP</div>
+    <ul class="checklist-list" id="checklist-list"></ul>
+  </section>
 
   <main class="layout">
     <section class="camera-panel">
@@ -87,6 +95,14 @@
         <span class="metric-label">GPS</span>
         <span class="metric-value-sm" id="sensor-gps">Tidak ada fix</span>
       </div>
+      <div class="sensor-metric full-span">
+        <span class="metric-label">Lokasi GPS</span>
+        <span class="metric-value-sm" id="sensor-gps-detail">Lat: ---.------° / Lon: ---.------°</span>
+      </div>
+      <div class="sensor-metric full-span">
+        <span class="metric-label">Kemiringan alat</span>
+        <span class="metric-value-sm" id="sensor-tilt">X: ---.--° / Y: ---.--° / STATUS: NORMAL</span>
+      </div>
     </div>
   </section>
 
@@ -98,5 +114,6 @@
   </footer>
 
   <script src="{{ url_for('static', filename='dashboard.js') }}"></script>
+  </div>
 </body>
 </html>

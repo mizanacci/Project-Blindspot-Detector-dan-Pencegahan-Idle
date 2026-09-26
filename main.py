@@ -136,7 +136,8 @@ def setup_log():
         with open(SENSOR_LOG_FILE, 'w', newline='') as f:
             csv.writer(f).writerow([
                 'timestamp', 'status_mesin', 'status_idle', 'durasi_idle_s',
-                'getaran_g', 'sw420_terdeteksi', 'gps_fix', 'gps_lat', 'gps_lon'
+                'getaran_g', 'sw420_terdeteksi', 'gps_fix', 'gps_lat', 'gps_lon',
+                'tilt_x_deg', 'tilt_y_deg', 'tilt_status'
             ])
 
 
@@ -181,8 +182,82 @@ def urgensi_paling_parah(tracks_aktif, cfg):
     return terparah[1], terparah[2], terparah[0], terparah[3]
 
 
+def wait_for_operator_start():
+    """Mencegah sistem langsung aktif tanpa persetujuan operator."""
+    print("\nPanduan mulai sistem:")
+    print("1. Pastikan area sekitar alat berat aman.")
+    print("2. Pastikan kamera, sensor, dan GPS sudah siap.")
+    print("3. Tekan Enter untuk mulai deteksi blind spot.")
+    print("   (Mode non-interaktif: sistem akan mulai otomatis.)")
+
+    try:
+        if sys.stdin.isatty():
+            input()
+    except (EOFError, KeyboardInterrupt):
+        print("Start dibatalkan oleh operator.")
+        raise
+
+    print("Operator menekan start. Sistem dimulai.\n")
+
+
+def run_startup_check(cfg, cap, mpu6050, sw420, gps):
+    """Hasil cek awal untuk operator; ini bukan pengganti alarm blind spot."""
+    checks = []
+    checks.append({
+        "label": "Kalibrasi zona",
+        "ok": bool(cfg and isinstance(cfg.get("calibration_points"), list) and len(cfg["calibration_points"]) >= 2),
+        "critical": True,
+    })
+    checks.append({
+        "label": "Kamera /dev/video0",
+        "ok": bool(cap is not None and cap.isOpened()),
+        "critical": True,
+    })
+    checks.append({
+        "label": "MPU6050",
+        "ok": mpu6050 is not None,
+        "critical": False,
+    })
+    checks.append({
+        "label": "SW-420",
+        "ok": sw420 is not None,
+        "critical": False,
+    })
+    checks.append({
+        "label": "GPS",
+        "ok": gps is not None,
+        "critical": False,
+    })
+    checks.append({
+        "label": "Alarm pengaman siap",
+        "ok": True,
+        "critical": True,
+    })
+    return checks
+
+
+def startup_ready_for_start(checks):
+    """Startup diperbolehkan hanya bila semua item kritis sudah OK."""
+    for item in checks:
+        if item.get("critical") and not item.get("ok", False):
+            return False
+    return True
+
+
+def can_use_gui():
+    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+
+def safe_imshow(window_name, frame):
+    if not can_use_gui() or frame is None:
+        return -1
+    cv2.imshow(window_name, frame)
+    return cv2.waitKey(1) & 0xFF
+
+
 def main():
     start_dashboard_server()
+    state.set_operator_notice("Sistem siap — menunggu operator menekan start")
 
     cfg = load_zone_config()
 
@@ -235,6 +310,24 @@ def main():
     led_merah = LED(LED_MERAH_PIN)
 
     setup_log()
+    startup_checks = run_startup_check(cfg, cap, mpu6050, sw420, gps)
+    state.update_startup_checks(startup_checks)
+    print("Checklist startup:")
+    for item in startup_checks:
+        status = 'OK' if item['ok'] else 'PERIKSA'
+        prioritas = 'KRITIS' if item.get('critical') else 'OPSIONAL'
+        print(f"  - {item['label']}: {status} [{prioritas}]")
+
+    if not startup_ready_for_start(startup_checks):
+        state.set_operator_notice("START DIBLOKIR: item kritis belum siap")
+        print("\nSTART DIBLOKIR. Perbaiki item kritis berikut sebelum menjalankan sistem:")
+        for item in startup_checks:
+            if item.get('critical') and not item.get('ok', False):
+                print(f"  - {item['label']}")
+        return
+
+    wait_for_operator_start()
+    state.set_operator_notice("Sistem aktif — deteksi blind spot berjalan")
     print("Sistem deteksi blind spot berjalan. Ctrl+C untuk berhenti.\n")
 
     frame_ke = 0
@@ -260,7 +353,8 @@ def main():
 
             sensor_mpu = (mpu6050.baca_status() if mpu6050 is not None else {
                 'status_mesin': 'TIDAK_PASTI', 'status_idle': 'AMAN',
-                'durasi_idle_s': 0, 'getaran_g': 0.0
+                'durasi_idle_s': 0, 'getaran_g': 0.0,
+                'tilt_x_deg': 0.0, 'tilt_y_deg': 0.0, 'tilt_status': 'NORMAL',
             })
             sw420_terdeteksi = sw420.baca_terdeteksi() if sw420 is not None else False
             gps_lokasi = (gps.baca_lokasi(maks_baris=GPS_MAX_LINES) if gps is not None else {
@@ -274,7 +368,9 @@ def main():
             state.update_sensor_tambahan(
                 sensor_mpu['status_mesin'], sensor_mpu['status_idle'],
                 sensor_mpu['durasi_idle_s'], sensor_mpu['getaran_g'],
-                gps_lokasi['fix'], gps_lokasi['lat'], gps_lokasi['lon']
+                gps_lokasi['fix'], gps_lokasi['lat'], gps_lokasi['lon'],
+                sensor_mpu['tilt_x_deg'], sensor_mpu['tilt_y_deg'],
+                sensor_mpu['tilt_status']
             )
 
             timestamp = datetime.now().isoformat(timespec='seconds')
@@ -284,6 +380,9 @@ def main():
             print(f"  sensor: mesin={sensor_mpu['status_mesin']}  "
                 f"idle={sensor_mpu['status_idle']}  "
                 f"getaran={sensor_mpu['getaran_g']:.4f}g  "
+                f"tilt_x={sensor_mpu['tilt_x_deg']:.1f}deg  "
+                f"tilt_y={sensor_mpu['tilt_y_deg']:.1f}deg  "
+                f"tilt_status={sensor_mpu['tilt_status']}  "
                 f"SW420={sw420_terdeteksi}  "
                 f"GPS fix={gps_lokasi['fix']} ({gps_lokasi['lat']:.6f}, {gps_lokasi['lon']:.6f})")
 
@@ -295,11 +394,11 @@ def main():
                 timestamp, sensor_mpu['status_mesin'], sensor_mpu['status_idle'],
                 sensor_mpu['durasi_idle_s'], sensor_mpu['getaran_g'],
                 int(sw420_terdeteksi), gps_lokasi['fix'], gps_lokasi['lat'],
-                gps_lokasi['lon']
+                gps_lokasi['lon'], sensor_mpu['tilt_x_deg'], sensor_mpu['tilt_y_deg'],
+                sensor_mpu['tilt_status']
             ])
-            cv2.imshow("Blind Spot Detector - Camera", frame)
-
-            if cv2.waitKey(1) & 0xFF == ord('q'):
+            key = safe_imshow("Blind Spot Detector - Camera", frame)
+            if key == ord('q'):
                 break
 
             throttle.tunggu_sisa_waktu()
@@ -307,6 +406,8 @@ def main():
     except KeyboardInterrupt:
         print("\nDihentikan oleh pengguna.")
     finally:
+        if can_use_gui():
+            cv2.destroyAllWindows()
         buzzer.off(); led_hijau.off(); led_kuning.off(); led_merah.off()
         if mpu6050 is not None:
             mpu6050.close()

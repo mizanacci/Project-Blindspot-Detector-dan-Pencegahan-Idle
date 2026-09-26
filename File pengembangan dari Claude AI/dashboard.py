@@ -17,6 +17,7 @@ yang sudah jalan tetap lewat proses bertahap).
 Akses dari browser laptop: http://<ip-raspberry-pi>:5000
 """
 
+import csv
 import os
 import threading
 import time
@@ -55,10 +56,16 @@ class SharedState:
         self.status_idle = None
         self.durasi_idle_s = 0
         self.getaran_g = 0.0
+        self.tilt_x_deg = 0.0
+        self.tilt_y_deg = 0.0
+        self.tilt_status = "NORMAL"
         self.gps_fix = 0
         self.gps_lat = 0.0
         self.gps_lon = 0.0
         self.sensor_last_update = None
+        self.operator_message = "Sistem siap — menunggu operator menekan start"
+        self.startup_checks = []
+        self.history = []
 
     def update_frame(self, frame_bgr):
         ok, buf = cv2.imencode(".jpg", frame_bgr, [cv2.IMWRITE_JPEG_QUALITY, 80])
@@ -82,18 +89,34 @@ class SharedState:
                 self.events = self.events[:15]
 
     def update_sensor_tambahan(self, status_mesin, status_idle, durasi_idle_s,
-                                getaran_g, gps_fix, gps_lat, gps_lon):
-        """Status mesin/idle/getaran/GPS -- terpisah total dari
+                                getaran_g, gps_fix, gps_lat, gps_lon,
+                                tilt_x_deg=0.0, tilt_y_deg=0.0, tilt_status="NORMAL"):
+        """Status mesin/idle/getaran/kemiringan/GPS -- terpisah total dari
         update_status() di atas, tidak memicu/mengubah events blind spot."""
         with self.lock:
             self.status_mesin = status_mesin
             self.status_idle = status_idle
             self.durasi_idle_s = durasi_idle_s
             self.getaran_g = getaran_g
+            self.tilt_x_deg = tilt_x_deg
+            self.tilt_y_deg = tilt_y_deg
+            self.tilt_status = tilt_status
             self.gps_fix = gps_fix
             self.gps_lat = gps_lat
             self.gps_lon = gps_lon
             self.sensor_last_update = time.strftime("%H:%M:%S")
+
+    def set_operator_notice(self, message):
+        with self.lock:
+            self.operator_message = message
+
+    def update_startup_checks(self, checks):
+        with self.lock:
+            self.startup_checks = list(checks)
+
+    def update_history(self, history_list):
+        with self.lock:
+            self.history = list(history_list)
 
     def snapshot(self):
         with self.lock:
@@ -109,14 +132,48 @@ class SharedState:
                 "status_idle": self.status_idle,
                 "durasi_idle_s": self.durasi_idle_s,
                 "getaran_g": self.getaran_g,
+                "tilt_x_deg": self.tilt_x_deg,
+                "tilt_y_deg": self.tilt_y_deg,
+                "tilt_status": self.tilt_status,
                 "gps_fix": self.gps_fix,
                 "gps_lat": self.gps_lat,
                 "gps_lon": self.gps_lon,
                 "sensor_last_update": self.sensor_last_update,
+                "operator_message": self.operator_message,
+                "startup_checks": list(self.startup_checks),
+                "history": list(self.history),
             }
 
 
 state = SharedState()
+
+
+def read_recent_history(log_path, limit=8):
+    items = []
+    if not os.path.exists(log_path):
+        return items
+    try:
+        with open(log_path, newline='') as handle:
+            reader = csv.reader(handle)
+            rows = list(reader)
+        if len(rows) <= 1:
+            return items
+        for row in rows[-limit:]:
+            if len(row) < 7:
+                continue
+            timestamp, jumlah_orang, jarak_m, durasi_s, skor, status_mentah, status_stabil = row[:7]
+            items.append({
+                "timestamp": timestamp,
+                "jumlah_orang": jumlah_orang,
+                "jarak_m": jarak_m,
+                "durasi_s": durasi_s,
+                "skor": skor,
+                "status_mentah": status_mentah,
+                "status_stabil": status_stabil,
+            })
+    except Exception:
+        return items
+    return items
 
 
 @app.route("/")
@@ -138,6 +195,8 @@ def video_feed():
 
 @app.route("/status")
 def status_endpoint():
+    history = read_recent_history(os.path.join(os.path.dirname(_DASHBOARD_DIR), "log_blindspot.csv"), limit=8)
+    state.update_history(history)
     return jsonify(state.snapshot())
 
 

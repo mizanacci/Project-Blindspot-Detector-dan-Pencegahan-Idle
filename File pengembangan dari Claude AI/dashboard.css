@@ -34,12 +34,54 @@ html, body {
 
 body { display: flex; flex-direction: column; }
 
+/* ---------- Layout base (same dashboard for laptop + LCD) ---------- */
+#app-shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
 /* ---------- Topbar ---------- */
 .topbar {
   display: flex; justify-content: space-between; align-items: center;
   padding: 16px 28px; border-bottom: 1px solid var(--border-subtle);
   flex-shrink: 0;
 }
+.startup-banner {
+  margin: 12px 28px 0;
+  padding: 8px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 3px;
+  background: rgba(245, 166, 35, 0.08);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.startup-checklist {
+  margin: 12px 28px 0;
+  padding: 12px 16px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 3px;
+  background: var(--bg-panel);
+}
+.checklist-header {
+  color: var(--text-secondary);
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  margin-bottom: 8px;
+}
+.checklist-list { list-style: none; display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; }
+.checklist-item {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-primary);
+  border: 1px solid var(--border-subtle);
+  border-radius: 3px;
+  padding: 6px 8px;
+}
+.checklist-item.ok { border-color: rgba(31, 157, 85, 0.5); }
+.checklist-item.bad { border-color: rgba(224, 48, 61, 0.5); }
+.checklist-item.critical { box-shadow: inset 0 0 0 1px rgba(224, 48, 61, 0.15); }
 .brand-mark { font-weight: 700; font-size: 22px; letter-spacing: 0.04em; color: var(--accent); }
 .brand-sub { font-size: 13px; color: var(--text-secondary); margin-left: 14px; padding-left: 14px; border-left: 1px solid var(--border-subtle); }
 .topbar-meta { display: flex; align-items: center; gap: 8px; font-family: var(--font-mono); font-size: 13px; color: var(--text-secondary); }
@@ -103,9 +145,14 @@ body { display: flex; flex-direction: column; }
   font-family: var(--font-mono); font-size: 12px; color: var(--text-secondary);
 }
 .sensor-metrics {
-  display: grid; grid-template-columns: repeat(5, 1fr); gap: 16px;
+  display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 16px;
 }
 .sensor-metric { display: flex; flex-direction: column; gap: 3px; }
+.sensor-metric.full-span {
+  grid-column: 1 / -1;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-subtle);
+}
 .metric-value-sm {
   font-family: var(--font-mono); font-size: 18px; font-weight: 600;
   color: var(--text-primary);
@@ -125,12 +172,29 @@ body { display: flex; flex-direction: column; }
 .event-item.aman { color: var(--status-aman); }
 .event-empty { opacity: 0.6; }
 
-/* ---------- Responsif untuk layar LCD kecil (rencana pengembangan) ---------- */
+/* ---------- Responsif untuk laptop dan LCD 7-inch ---------- */
 @media (max-width: 900px) {
-  .layout { grid-template-columns: 1fr; }
+  .topbar { padding: 12px 16px; }
+  .layout { grid-template-columns: 1fr; gap: 12px; padding: 12px 16px 8px; }
   .camera-frame { min-height: 200px; }
-  .status-word { font-size: 40px; }
-  .metric-value { font-size: 22px; }
-  .sensor-metrics { grid-template-columns: repeat(2, 1fr); }
+  .status-panel { padding: 14px 16px; }
+  .status-word { font-size: 34px; }
+  .metric-value { font-size: 20px; }
+  .sensor-panel { margin: 0 16px 12px; padding: 12px 14px; }
+  .sensor-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+  .event-log { padding: 10px 16px; }
   .brand-sub { display: none; }
+  .startup-banner, .startup-checklist { margin-left: 16px; margin-right: 16px; }
+}
+
+@media (max-width: 560px) {
+  .topbar-meta { gap: 6px; }
+  .brand-mark { font-size: 18px; }
+  .brand-sub { display: none; }
+  .status-word { font-size: 28px; }
+  .metric-label, .sensor-panel-title, .sensor-panel-sub, .event-log { font-size: 10px; }
+  .metric-value, .metric-value-sm { font-size: 16px; }
+  .camera-frame { min-height: 160px; }
+  .sensor-metrics { grid-template-columns: 1fr; }
+  .checklist-list { grid-template-columns: 1fr; }
 }

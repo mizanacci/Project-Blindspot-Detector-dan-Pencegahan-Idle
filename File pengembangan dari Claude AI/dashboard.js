@@ -20,15 +20,40 @@ function perbaruiJam() {
     new Date().toLocaleTimeString("id-ID", { hour12: false });
 }
 
-function renderEvents(events) {
+function renderEvents(events, history) {
   const el = document.getElementById("event-list");
-  if (!events || events.length === 0) {
+  const historyItems = Array.isArray(history) ? history : [];
+  const eventItems = Array.isArray(events) ? events : [];
+
+  const items = [...eventItems, ...historyItems.slice(0, 5)].slice(0, 8);
+
+  if (items.length === 0) {
     el.innerHTML = '<span class="event-empty">Belum ada perubahan status</span>';
     return;
   }
-  el.innerHTML = events
-    .map((e) => `<span class="event-item ${e.status}">${e.waktu} — ${LABEL_STATUS[e.status] || e.status}</span>`)
-    .join("");
+
+  el.innerHTML = items.map((item) => {
+    if (item.status) {
+      return `<span class="event-item ${item.status}">${item.waktu} — ${LABEL_STATUS[item.status] || item.status}</span>`;
+    }
+    const status = item.status_stabil || item.status_mentah || "status";
+    return `<span class="event-item ${status}">${item.timestamp} — ${status.toUpperCase()} / ${Number(item.jarak_m || 0).toFixed(1)}m</span>`;
+  }).join("");
+}
+
+function renderStartupChecks(checks) {
+  const el = document.getElementById("checklist-list");
+  if (!el) return;
+  const items = Array.isArray(checks) ? checks : [];
+  if (items.length === 0) {
+    el.innerHTML = '<li class="checklist-item">Menunggu hasil checklist startup…</li>';
+    return;
+  }
+  el.innerHTML = items.map((item) => `
+    <li class="checklist-item ${item.ok ? 'ok' : 'bad'} ${item.critical ? 'critical' : ''}">
+      ${item.label}: ${item.ok ? 'OK' : 'PERIKSA'} ${item.critical ? ' [KRITIS]' : ' [OPSIONAL]'}
+    </li>
+  `).join("");
 }
 
 // Panel sensor tambahan (mesin/idle/GPS) -- render terpisah dari
@@ -44,18 +69,33 @@ function renderSensorTambahan(data) {
   document.getElementById("sensor-durasi-idle").textContent = belumAdaData
     ? "--:--" : formatDurasi(data.durasi_idle_s);
   document.getElementById("sensor-getaran").textContent = belumAdaData
-    ? "\u2014 g" : `${data.getaran_g.toFixed(3)} g`;
+    ? "\u2014 g" : `${Number(data.getaran_g || 0).toFixed(3)} g`;
+
+  const tiltX = belumAdaData ? 0 : Number(data.tilt_x_deg || 0);
+  const tiltY = belumAdaData ? 0 : Number(data.tilt_y_deg || 0);
+  const tiltStatus = belumAdaData ? "NORMAL" : (data.tilt_status || "NORMAL");
+  document.getElementById("sensor-tilt").textContent = `X: ${tiltX.toFixed(1)}° / Y: ${tiltY.toFixed(1)}° / STATUS: ${tiltStatus}`;
 
   const gpsEl = document.getElementById("sensor-gps");
+  const gpsDetailEl = document.getElementById("sensor-gps-detail");
   if (belumAdaData || !data.gps_fix) {
     gpsEl.textContent = "Tidak ada fix";
+    gpsDetailEl.textContent = "Lat: ---.------° / Lon: ---.------°";
   } else {
-    gpsEl.textContent = `${data.gps_lat.toFixed(5)}, ${data.gps_lon.toFixed(5)}`;
+    const lat = Number(data.gps_lat || 0);
+    const lon = Number(data.gps_lon || 0);
+    gpsEl.textContent = `FIX AKTIF`;
+    gpsDetailEl.textContent = `Lat: ${lat.toFixed(6)}° / Lon: ${lon.toFixed(6)}°`;
   }
 
   document.getElementById("sensor-last-update").textContent = belumAdaData
     ? "Menunggu data sensor\u2026"
     : `Update terakhir ${data.sensor_last_update}`;
+
+  const banner = document.getElementById("startup-banner");
+  if (banner) {
+    banner.textContent = data.operator_message || "Sistem siap — menunggu operator menekan start";
+  }
 }
 
 async function perbaruiStatus() {
@@ -77,7 +117,8 @@ async function perbaruiStatus() {
     document.getElementById("metric-durasi").textContent = formatDurasi(data.durasi_s);
     document.getElementById("metric-orang").textContent = data.jumlah_orang;
 
-    renderEvents(data.events);
+    renderEvents(data.events, data.history);
+    renderStartupChecks(data.startup_checks);
     renderSensorTambahan(data);
 
     document.getElementById("live-dot").style.background = "var(--status-aman)";
