@@ -84,6 +84,71 @@ pass-through header (ada 2 baris pin di sisi bawah papan LCD, jadi pin
 lain tetap bisa disambung lewat situ). Kalau ragu, tanyakan dulu
 sebelum beli, atau siapkan rencana pindah LED/buzzer ke pin lain.
 
+## Kalibrasi reference MPU6050
+
+Jika MPU6050 dipasang vertikal, sudut absolut sekitar 90 derajat dapat
+merupakan posisi normal pemasangan. Sistem memakai posisi alat yang
+normal sebagai reference, lalu menampilkan perubahan relatif terhadap
+reference tersebut. Threshold `BATAS_KEMIRINGAN_RELATIF_DERAJAT` adalah
+threshold perubahan relatif, bukan sudut absolut mounting.
+
+Letakkan alat pada posisi normal dan diam, lalu jalankan di Raspberry Pi:
+
+```bash
+cd ~/blindspot_detector
+python3 calibrate_mpu.py
+```
+
+Reference disimpan di `mpu6050_calibration.json`. Untuk reset dan
+kalibrasi ulang:
+
+```bash
+rm -f mpu6050_calibration.json
+python3 calibrate_mpu.py
+```
+
+Jangan kalibrasi ulang ketika alat sedang miring atau bergetar. Tanpa
+reference, dashboard menampilkan `REFERENCE_BELUM_DIKALIBRASI` dan sensor
+MPU tetap opsional; jalur blind spot tidak dihentikan.
+
+## Diagnosis GPS
+
+Jalankan:
+
+```bash
+cd ~/blindspot_detector
+python3 test_gps.py
+```
+
+Arti status:
+
+- `GPS UART NO DATA`: port terbuka tetapi belum menerima sentence NMEA.
+- `GPS UART OK - MENUNGGU FIX`: NMEA diterima, tetapi receiver belum mendapat posisi.
+- `GPS FIX AKTIF`: posisi valid tersedia; jumlah satelit dan koordinat ditampilkan.
+- `GPS UART ERROR`: pembacaan serial mengalami error.
+
+Untuk pengujian pertama, bawa antena ke luar rumah, arahkan ke atas,
+jauhkan dari sumber noise RF, dan tunggu beberapa menit. GPS indoor dapat
+menerima UART/NMEA tetapi tetap `NO FIX`; kondisi itu tidak berarti modul
+rusak dan tidak memblokir deteksi blind spot.
+
+## Dashboard laptop dan LCD
+
+Jalankan sistem utama:
+
+```bash
+python3 main.py
+```
+
+Buka URL yang sama dari laptop atau LCD touchscreen:
+`http://<IP-RASPBERRY-PI>:5000/`
+
+Dashboard menampilkan kamera utama, status `AMAN/SIAGA/BAHAYA`, identitas
+`TIM SALOMO`, sensor mesin, tilt relatif, diagnosis GPS, link peta ketika
+fix tersedia, dan history gabungan dari dua CSV. Tombol `MULAI DETEKSI`
+hanya mengirim permintaan start; tidak tersedia kontrol dashboard untuk
+mematikan alarm keselamatan.
+
 ## Cara menambahkan ke workspace SSH kamu
 
 Dari laptop (bukan dari Pi), salin ke folder workspace yang sudah ada:
@@ -114,7 +179,7 @@ mungkin lalu nunggu. ini yang paling langsung menjawab "jangan terlalu
 banyak data tiap detik" dan "jangan overheat", karena CPU yang benar-benar
 `sleep()` (bukan sibuk berulang menunggu) itu yang suhunya turun.
 
-Ini file REFERENSI, bukan untuk langsung dipakai — cara memasukkannya ke
-`main.py` yang sudah ada ada di prompt Copilot di bawah, sengaja
-dipisah supaya perubahan ke file yang sudah jalan tetap lewat proses
-bertahap.
+Loop utama sudah memakainya sebagai pembatas laju pembacaan sensor dan
+update dashboard. Kegagalan GPS, MPU6050, SW-420, atau dashboard tidak
+menjadi alasan untuk menghentikan jalur YOLO NCNN, tracker, fuzzy, dan
+alarm GPIO.

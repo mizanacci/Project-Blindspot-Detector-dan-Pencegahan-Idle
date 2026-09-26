@@ -84,6 +84,7 @@ body { display: flex; flex-direction: column; }
 .checklist-item.critical { box-shadow: inset 0 0 0 1px rgba(224, 48, 61, 0.15); }
 .brand-mark { font-weight: 700; font-size: 22px; letter-spacing: 0.04em; color: var(--accent); }
 .brand-sub { font-size: 13px; color: var(--text-secondary); margin-left: 14px; padding-left: 14px; border-left: 1px solid var(--border-subtle); }
+.brand-team { font-family: var(--font-mono); font-size: 12px; color: var(--accent); margin-left: 14px; }
 .topbar-meta { display: flex; align-items: center; gap: 8px; font-family: var(--font-mono); font-size: 13px; color: var(--text-secondary); }
 .meta-divider { opacity: 0.5; }
 .live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--status-aman); animation: pulse 2s infinite; }
@@ -95,12 +96,12 @@ body { display: flex; flex-direction: column; }
 
 /* ---------- Layout utama ---------- */
 .layout {
-  flex: 1; display: grid; grid-template-columns: 1.6fr 1fr;
-  gap: 20px; padding: 20px 28px 12px; min-height: 0;
+  flex: 0 0 auto; display: grid; grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr);
+  gap: 20px; padding: 20px 28px 12px; min-height: 0; align-items: stretch;
 }
 
-.camera-panel { min-height: 0; }
-.camera-frame { position: relative; height: 100%; min-height: 200px; background: #000; border-radius: 3px; overflow: hidden; }
+.camera-panel { min-width: 0; min-height: 0; }
+.camera-frame { position: relative; width: 100%; height: auto; min-height: 0; aspect-ratio: 16 / 9; background: #000; border-radius: 3px; overflow: hidden; }
 .camera-frame img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .reticle-corner { position: absolute; width: 26px; height: 26px; border: 2px solid var(--accent); opacity: 0.8; pointer-events: none; }
 .reticle-corner.tl { top: 10px; left: 10px; border-right: none; border-bottom: none; }
@@ -112,8 +113,8 @@ body { display: flex; flex-direction: column; }
 /* ---------- Panel status blind spot (alarm keselamatan) ---------- */
 .status-panel {
   background: var(--status-aman); border-radius: 3px; padding: 18px 22px;
-  display: flex; flex-direction: column; color: #FFFFFF; height: 100%;
-  transition: background-color 0.35s ease; min-height: 0;
+  display: flex; flex-direction: column; color: #FFFFFF; height: auto;
+  transition: background-color 0.35s ease; min-height: 0; align-self: stretch;
 }
 .status-panel.siaga { background: var(--status-siaga); color: #1A1400; }
 .status-panel.bahaya { background: var(--status-bahaya); color: #FFFFFF; }
@@ -158,6 +159,27 @@ body { display: flex; flex-direction: column; }
   color: var(--text-primary);
 }
 
+.operator-actions { margin: 10px 28px 0; display: flex; justify-content: flex-end; }
+.start-button {
+  min-height: 42px; padding: 0 18px; border: 1px solid var(--accent);
+  border-radius: 3px; background: rgba(245, 166, 35, 0.12); color: var(--accent);
+  font-family: var(--font-mono); font-size: 13px; font-weight: 600; cursor: pointer;
+}
+.start-button:hover:not(:disabled), .start-button:focus-visible { background: var(--accent); color: #1C1E22; }
+.start-button:disabled { cursor: default; opacity: 0.65; }
+.map-link { display: inline-block; margin-top: 7px; color: var(--accent); font-family: var(--font-mono); font-size: 12px; }
+
+.history-panel { margin: 0 28px 16px; border: 1px solid var(--border-subtle); background: var(--bg-panel); padding: 14px 20px; }
+.history-header { display: flex; justify-content: space-between; margin-bottom: 10px; }
+.history-table-wrap { overflow-x: auto; }
+.history-table { width: 100%; border-collapse: collapse; font-family: var(--font-mono); font-size: 11px; white-space: nowrap; }
+.history-table th, .history-table td { padding: 7px 8px; border-top: 1px solid var(--border-subtle); text-align: left; }
+.history-table th { color: var(--text-secondary); font-weight: 500; }
+.history-table td { color: var(--text-primary); }
+.history-status.aman { color: var(--status-aman); }
+.history-status.siaga { color: var(--status-siaga); }
+.history-status.bahaya { color: var(--status-bahaya); }
+
 /* ---------- Riwayat / event log ---------- */
 .event-log {
   border-top: 1px solid var(--border-subtle); padding: 12px 28px;
@@ -184,6 +206,9 @@ body { display: flex; flex-direction: column; }
   .sensor-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
   .event-log { padding: 10px 16px; }
   .brand-sub { display: none; }
+  .brand-team { margin-left: 8px; font-size: 10px; }
+  .operator-actions { margin-left: 16px; margin-right: 16px; }
+  .history-panel { margin-left: 16px; margin-right: 16px; padding: 12px 14px; }
   .startup-banner, .startup-checklist { margin-left: 16px; margin-right: 16px; }
 }
 
@@ -191,10 +216,11 @@ body { display: flex; flex-direction: column; }
   .topbar-meta { gap: 6px; }
   .brand-mark { font-size: 18px; }
   .brand-sub { display: none; }
+  .brand-team { font-size: 9px; }
   .status-word { font-size: 28px; }
   .metric-label, .sensor-panel-title, .sensor-panel-sub, .event-log { font-size: 10px; }
   .metric-value, .metric-value-sm { font-size: 16px; }
-  .camera-frame { min-height: 160px; }
+  .camera-frame { min-height: 220px; height: auto; }
   .sensor-metrics { grid-template-columns: 1fr; }
   .checklist-list { grid-template-columns: 1fr; }
 }

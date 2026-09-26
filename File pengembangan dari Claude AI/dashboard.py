@@ -9,10 +9,8 @@ tertinggi), status idle/GPS itu informasi hemat BBM/lokasi (kelas
 urgensi jauh berbeda). Digabung jadi satu bisa membuat operator
 kehilangan sensitivitas ke alarm yang benar-benar penting.
 
-BELUM diintegrasikan ke main.py -- update_sensor_tambahan() di bawah
-ini siap dipanggil, tapi main.py yang memanggilnya adalah pekerjaan
-Copilot sesuai prompt yang sudah diberikan (supaya perubahan ke file
-yang sudah jalan tetap lewat proses bertahap).
+Status sensor tambahan diisi oleh main.py tanpa menjadi syarat kritis
+untuk jalur alarm blind spot.
 
 Akses dari browser laptop: http://<ip-raspberry-pi>:5000
 """
@@ -62,8 +60,17 @@ class SharedState:
         self.gps_fix = 0
         self.gps_lat = 0.0
         self.gps_lon = 0.0
+        self.gps_status = "GPS BELUM DICEK"
+        self.gps_uart_status = "BELUM DICEK"
+        self.gps_nmea_received = False
+        self.gps_nmea_sentence_count = 0
+        self.gps_gga_received = False
+        self.gps_rmc_received = False
+        self.gps_satellites = None
+        self.gps_last_sentence_time = None
         self.sensor_last_update = None
         self.operator_message = "Sistem siap — menunggu operator menekan start"
+        self.start_requested = False
         self.startup_checks = []
         self.history = []
 
@@ -90,7 +97,11 @@ class SharedState:
 
     def update_sensor_tambahan(self, status_mesin, status_idle, durasi_idle_s,
                                 getaran_g, gps_fix, gps_lat, gps_lon,
-                                tilt_x_deg=0.0, tilt_y_deg=0.0, tilt_status="NORMAL"):
+                                tilt_x_deg=0.0, tilt_y_deg=0.0, tilt_status="NORMAL",
+                                gps_status="GPS BELUM DICEK", gps_uart_status="BELUM DICEK",
+                                gps_nmea_received=False, gps_nmea_sentence_count=0,
+                                gps_gga_received=False, gps_rmc_received=False,
+                                gps_satellites=None, gps_last_sentence_time=None):
         """Status mesin/idle/getaran/kemiringan/GPS -- terpisah total dari
         update_status() di atas, tidak memicu/mengubah events blind spot."""
         with self.lock:
@@ -104,11 +115,30 @@ class SharedState:
             self.gps_fix = gps_fix
             self.gps_lat = gps_lat
             self.gps_lon = gps_lon
+            self.gps_status = gps_status
+            self.gps_uart_status = gps_uart_status
+            self.gps_nmea_received = gps_nmea_received
+            self.gps_nmea_sentence_count = gps_nmea_sentence_count
+            self.gps_gga_received = gps_gga_received
+            self.gps_rmc_received = gps_rmc_received
+            self.gps_satellites = gps_satellites
+            self.gps_last_sentence_time = gps_last_sentence_time
             self.sensor_last_update = time.strftime("%H:%M:%S")
 
     def set_operator_notice(self, message):
         with self.lock:
             self.operator_message = message
+
+    def request_start(self):
+        with self.lock:
+            self.start_requested = True
+            self.operator_message = "Permintaan mulai diterima — menunggu sistem"
+
+    def consume_start_request(self):
+        with self.lock:
+            requested = self.start_requested
+            self.start_requested = False
+            return requested
 
     def update_startup_checks(self, checks):
         with self.lock:
@@ -138,8 +168,17 @@ class SharedState:
                 "gps_fix": self.gps_fix,
                 "gps_lat": self.gps_lat,
                 "gps_lon": self.gps_lon,
+                "gps_status": self.gps_status,
+                "gps_uart_status": self.gps_uart_status,
+                "gps_nmea_received": self.gps_nmea_received,
+                "gps_nmea_sentence_count": self.gps_nmea_sentence_count,
+                "gps_gga_received": self.gps_gga_received,
+                "gps_rmc_received": self.gps_rmc_received,
+                "gps_satellites": self.gps_satellites,
+                "gps_last_sentence_time": self.gps_last_sentence_time,
                 "sensor_last_update": self.sensor_last_update,
                 "operator_message": self.operator_message,
+                "start_requested": self.start_requested,
                 "startup_checks": list(self.startup_checks),
                 "history": list(self.history),
             }
@@ -148,8 +187,16 @@ class SharedState:
 state = SharedState()
 
 
-def read_recent_history(log_path, limit=8):
+def read_recent_history(log_path, sensor_log_path=None, limit=8):
     items = []
+    sensor_by_timestamp = {}
+    if sensor_log_path and os.path.exists(sensor_log_path):
+        try:
+            with open(sensor_log_path, newline='') as handle:
+                for row in csv.DictReader(handle):
+                    sensor_by_timestamp[row.get("timestamp")] = row
+        except Exception:
+            sensor_by_timestamp = {}
     if not os.path.exists(log_path):
         return items
     try:
@@ -170,6 +217,17 @@ def read_recent_history(log_path, limit=8):
                 "skor": skor,
                 "status_mentah": status_mentah,
                 "status_stabil": status_stabil,
+                "status_mesin": sensor_by_timestamp.get(timestamp, {}).get("status_mesin"),
+                "status_idle": sensor_by_timestamp.get(timestamp, {}).get("status_idle"),
+                "durasi_idle_s": sensor_by_timestamp.get(timestamp, {}).get("durasi_idle_s"),
+                "getaran_g": sensor_by_timestamp.get(timestamp, {}).get("getaran_g"),
+                "sw420_terdeteksi": sensor_by_timestamp.get(timestamp, {}).get("sw420_terdeteksi"),
+                "tilt_x_deg": sensor_by_timestamp.get(timestamp, {}).get("tilt_x_deg"),
+                "tilt_y_deg": sensor_by_timestamp.get(timestamp, {}).get("tilt_y_deg"),
+                "tilt_status": sensor_by_timestamp.get(timestamp, {}).get("tilt_status"),
+                "gps_fix": sensor_by_timestamp.get(timestamp, {}).get("gps_fix"),
+                "gps_lat": sensor_by_timestamp.get(timestamp, {}).get("gps_lat"),
+                "gps_lon": sensor_by_timestamp.get(timestamp, {}).get("gps_lon"),
             })
     except Exception:
         return items
@@ -195,9 +253,20 @@ def video_feed():
 
 @app.route("/status")
 def status_endpoint():
-    history = read_recent_history(os.path.join(os.path.dirname(_DASHBOARD_DIR), "log_blindspot.csv"), limit=8)
+    root_dir = os.path.dirname(_DASHBOARD_DIR)
+    history = read_recent_history(
+        os.path.join(root_dir, "log_blindspot.csv"),
+        os.path.join(root_dir, "log_sensor_tambahan.csv"),
+        limit=8,
+    )
     state.update_history(history)
     return jsonify(state.snapshot())
+
+
+@app.route("/start", methods=["POST"])
+def request_start():
+    state.request_start()
+    return jsonify({"ok": True, "message": "Permintaan mulai diterima"})
 
 
 def start_dashboard_server(host="0.0.0.0", port=5000):

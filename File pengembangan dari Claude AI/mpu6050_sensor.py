@@ -33,11 +33,16 @@ dulu (burst) dan pakai deviasi PUNCAK dalam burst itu, bukan satu titik.
 
 import time
 import math
+import json
+import os
 
 AMBANG_MESIN_MATI = 0.030   # di bawah ini = tidak ada getaran berarti
 AMBANG_GERAK = 0.180        # di atas ini = jelas bergerak/beroperasi, bukan idle
 DURASI_PERINGATAN_S = 3 * 60  # 3 menit idle -> IDLE_LAMA
-BATAS_KEMIRINGAN_DERAJAT = 12.0
+BATAS_KEMIRINGAN_RELATIF_DERAJAT = 12.0
+FILE_KALIBRASI_DEFAULT = os.path.join(
+    os.path.dirname(__file__), "mpu6050_calibration.json"
+)
 
 MPU_ADDR = 0x68
 PWR_MGMT_1 = 0x6B
@@ -52,7 +57,8 @@ def _clip(value, minimum, maximum):
 
 
 class MPU6050Sensor:
-    def __init__(self, bus_num=1, smbus_module=None, durasi_burst_s=0.2):
+    def __init__(self, bus_num=1, smbus_module=None, durasi_burst_s=0.2,
+                 calibration_file=FILE_KALIBRASI_DEFAULT):
         """
         smbus_module: parameter tambahan HANYA untuk pengujian tanpa
         hardware asli (disuntik dengan bus tiruan). Di pemakaian normal,
@@ -68,6 +74,10 @@ class MPU6050Sensor:
         self._init_sensor()
         self._idle_mulai = None
         self.durasi_burst_s = durasi_burst_s
+        self.calibration_file = calibration_file
+        self.reference_tilt_x_deg = None
+        self.reference_tilt_y_deg = None
+        self.load_reference()
 
     def _init_sensor(self):
         self.bus.write_byte_data(MPU_ADDR, PWR_MGMT_1, 0)
@@ -97,10 +107,73 @@ class MPU6050Sensor:
         return tilt_x_deg, tilt_y_deg
 
     @staticmethod
-    def get_tilt_status(tilt_x_deg, tilt_y_deg, threshold_deg=BATAS_KEMIRINGAN_DERAJAT):
+    def normalize_angle_delta(angle_deg):
+        """Return the shortest signed angle difference in [-180, 180)."""
+        return (float(angle_deg) + 180.0) % 360.0 - 180.0
+
+    @staticmethod
+    def get_tilt_status(tilt_x_deg, tilt_y_deg,
+                        threshold_deg=BATAS_KEMIRINGAN_RELATIF_DERAJAT):
         if abs(float(tilt_x_deg)) > threshold_deg or abs(float(tilt_y_deg)) > threshold_deg:
             return "MIRING"
         return "NORMAL"
+
+    @property
+    def reference_available(self):
+        return (self.reference_tilt_x_deg is not None and
+                self.reference_tilt_y_deg is not None)
+
+    def load_reference(self):
+        try:
+            with open(self.calibration_file) as handle:
+                data = json.load(handle)
+            self.reference_tilt_x_deg = float(data["reference_tilt_x_deg"])
+            self.reference_tilt_y_deg = float(data["reference_tilt_y_deg"])
+        except (FileNotFoundError, KeyError, TypeError, ValueError, OSError):
+            self.reference_tilt_x_deg = None
+            self.reference_tilt_y_deg = None
+
+    def save_reference(self, reference):
+        self.reference_tilt_x_deg = float(reference["reference_tilt_x_deg"])
+        self.reference_tilt_y_deg = float(reference["reference_tilt_y_deg"])
+        with open(self.calibration_file, "w") as handle:
+            json.dump({
+                "reference_tilt_x_deg": self.reference_tilt_x_deg,
+                "reference_tilt_y_deg": self.reference_tilt_y_deg,
+            }, handle, indent=2)
+            handle.write("\n")
+
+    def calibrate_reference(self, jumlah_sampel=30, interval_s=0.05,
+                            batas_stabilitas_derajat=3.0):
+        """Average a stationary normal position and return a persistent reference."""
+        samples = []
+        for _ in range(jumlah_sampel):
+            ax, ay, az, _ = self._baca_magnitude_g()
+            samples.append(self.calculate_tilt_deg(ax, ay, az))
+            time.sleep(interval_s)
+
+        if not samples:
+            raise ValueError("Tidak ada sampel MPU6050")
+
+        tilt_x_values = [sample[0] for sample in samples]
+        tilt_y_values = [sample[1] for sample in samples]
+        if (max(tilt_x_values) - min(tilt_x_values) > batas_stabilitas_derajat or
+                max(tilt_y_values) - min(tilt_y_values) > batas_stabilitas_derajat):
+            raise ValueError("Posisi MPU tidak stabil selama kalibrasi")
+
+        reference = {
+            "reference_tilt_x_deg": sum(tilt_x_values) / len(tilt_x_values),
+            "reference_tilt_y_deg": sum(tilt_y_values) / len(tilt_y_values),
+        }
+        return reference
+
+    def _relative_tilt(self, raw_tilt_x_deg, raw_tilt_y_deg):
+        if not self.reference_available:
+            return raw_tilt_x_deg, raw_tilt_y_deg
+        return (
+            self.normalize_angle_delta(raw_tilt_x_deg - self.reference_tilt_x_deg),
+            self.normalize_angle_delta(raw_tilt_y_deg - self.reference_tilt_y_deg),
+        )
 
     def baca_status(self):
         """
@@ -131,12 +204,15 @@ class MPU6050Sensor:
             ax_avg = sum(ax_values) / len(ax_values)
             ay_avg = sum(ay_values) / len(ay_values)
             az_avg = sum(az_values) / len(az_values)
-            tilt_x_deg, tilt_y_deg = self.calculate_tilt_deg(ax_avg, ay_avg, az_avg)
+            raw_tilt_x_deg, raw_tilt_y_deg = self.calculate_tilt_deg(
+                ax_avg, ay_avg, az_avg
+            )
         except Exception:
             return {
                 "status_mesin": "TIDAK_PASTI", "status_idle": "AMAN",
                 "durasi_idle_s": 0, "getaran_g": 0.0,
-                "tilt_x_deg": 0.0, "tilt_y_deg": 0.0, "tilt_status": "NORMAL",
+                "tilt_x_deg": 0.0, "tilt_y_deg": 0.0,
+                "tilt_status": "TIDAK_DAPAT_DIBACA",
             }
 
         now = time.time()
@@ -155,7 +231,12 @@ class MPU6050Sensor:
             status_idle = "IDLE_LAMA" if durasi >= DURASI_PERINGATAN_S else "IDLE"
 
         durasi_idle_s = int(now - self._idle_mulai) if self._idle_mulai else 0
-        tilt_status = self.get_tilt_status(tilt_x_deg, tilt_y_deg)
+        tilt_x_deg, tilt_y_deg = self._relative_tilt(
+            raw_tilt_x_deg, raw_tilt_y_deg
+        )
+        tilt_status = (self.get_tilt_status(tilt_x_deg, tilt_y_deg)
+                       if self.reference_available else
+                       "REFERENCE_BELUM_DIKALIBRASI")
 
         return {
             "status_mesin": status_mesin,

@@ -20,6 +20,7 @@ import time
 import json
 import csv
 import os
+import select
 import sys
 from datetime import datetime
 
@@ -53,7 +54,7 @@ ZONE_CONFIG_FILE = "zone_config.json"
 # 1 = proses tiap frame (paling akurat, paling berat). Naikkan ke 2-3
 # kalau FPS di Pi 4 kamu masih terasa berat setelah pakai model NCNN.
 FRAME_SKIP = 1
-GPS_READ_TIMEOUT_S = 0.2
+GPS_READ_TIMEOUT_S = 0.05
 GPS_MAX_LINES = 5
 
 
@@ -192,7 +193,13 @@ def wait_for_operator_start():
 
     try:
         if sys.stdin.isatty():
-            input()
+            while True:
+                if state.consume_start_request():
+                    break
+                ready, _, _ = select.select([sys.stdin], [], [], 0.25)
+                if ready:
+                    input()
+                    break
     except (EOFError, KeyboardInterrupt):
         print("Start dibatalkan oleh operator.")
         raise
@@ -214,8 +221,13 @@ def run_startup_check(cfg, cap, mpu6050, sw420, gps):
         "critical": True,
     })
     checks.append({
-        "label": "MPU6050",
+        "label": "MPU6050 I2C",
         "ok": mpu6050 is not None,
+        "critical": False,
+    })
+    checks.append({
+        "label": "MPU6050 reference",
+        "ok": bool(mpu6050 is not None and mpu6050.reference_available),
         "critical": False,
     })
     checks.append({
@@ -224,7 +236,7 @@ def run_startup_check(cfg, cap, mpu6050, sw420, gps):
         "critical": False,
     })
     checks.append({
-        "label": "GPS",
+        "label": "GPS UART",
         "ok": gps is not None,
         "critical": False,
     })
@@ -354,11 +366,16 @@ def main():
             sensor_mpu = (mpu6050.baca_status() if mpu6050 is not None else {
                 'status_mesin': 'TIDAK_PASTI', 'status_idle': 'AMAN',
                 'durasi_idle_s': 0, 'getaran_g': 0.0,
-                'tilt_x_deg': 0.0, 'tilt_y_deg': 0.0, 'tilt_status': 'NORMAL',
+                'tilt_x_deg': 0.0, 'tilt_y_deg': 0.0,
+                'tilt_status': 'I2C TIDAK TERSEDIA',
             })
             sw420_terdeteksi = sw420.baca_terdeteksi() if sw420 is not None else False
             gps_lokasi = (gps.baca_lokasi(maks_baris=GPS_MAX_LINES) if gps is not None else {
-                'fix': 0, 'lat': 0.0, 'lon': 0.0
+                'fix': 0, 'lat': 0.0, 'lon': 0.0,
+                'status': 'GPS UART ERROR', 'uart_status': 'ERROR',
+                'nmea_received': False, 'nmea_sentence_count': 0,
+                'gga_received': False, 'rmc_received': False,
+                'satellites': None, 'last_sentence_time': None,
             })
 
             set_output(status_stabil, buzzer, led_hijau, led_kuning, led_merah)
@@ -370,7 +387,11 @@ def main():
                 sensor_mpu['durasi_idle_s'], sensor_mpu['getaran_g'],
                 gps_lokasi['fix'], gps_lokasi['lat'], gps_lokasi['lon'],
                 sensor_mpu['tilt_x_deg'], sensor_mpu['tilt_y_deg'],
-                sensor_mpu['tilt_status']
+                sensor_mpu['tilt_status'], gps_lokasi['status'],
+                gps_lokasi['uart_status'], gps_lokasi['nmea_received'],
+                gps_lokasi['nmea_sentence_count'], gps_lokasi['gga_received'],
+                gps_lokasi['rmc_received'], gps_lokasi['satellites'],
+                gps_lokasi['last_sentence_time']
             )
 
             timestamp = datetime.now().isoformat(timespec='seconds')
@@ -384,7 +405,9 @@ def main():
                 f"tilt_y={sensor_mpu['tilt_y_deg']:.1f}deg  "
                 f"tilt_status={sensor_mpu['tilt_status']}  "
                 f"SW420={sw420_terdeteksi}  "
-                f"GPS fix={gps_lokasi['fix']} ({gps_lokasi['lat']:.6f}, {gps_lokasi['lon']:.6f})")
+                f"GPS={gps_lokasi['status']}  "
+                f"sat={gps_lokasi['satellites'] or '-'}  "
+                f"({gps_lokasi['lat']:.6f}, {gps_lokasi['lon']:.6f})")
 
             log_reading([
                 timestamp, len(tracks_aktif), round(jarak_m, 1),

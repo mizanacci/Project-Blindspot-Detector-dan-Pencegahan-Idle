@@ -41,6 +41,36 @@ function renderEvents(events, history) {
   }).join("");
 }
 
+function renderHistoryTable(history) {
+  const el = document.getElementById("history-list");
+  if (!el) return;
+  const items = Array.isArray(history) ? history : [];
+  if (items.length === 0) {
+    el.innerHTML = '<tr><td colspan="10">Belum ada data histori</td></tr>';
+    return;
+  }
+  el.innerHTML = items.map((item) => {
+    const tilt = item.tilt_status
+      ? `${Number(item.tilt_x_deg || 0).toFixed(1)} / ${Number(item.tilt_y_deg || 0).toFixed(1)} ${item.tilt_status}`
+      : "--";
+    const gps = item.gps_fix
+      ? `${Number(item.gps_lat || 0).toFixed(4)}, ${Number(item.gps_lon || 0).toFixed(4)}`
+      : "NO FIX";
+    return `<tr>
+      <td>${item.timestamp || "--"}</td>
+      <td class="history-status ${item.status_stabil || ""}">${(item.status_stabil || "--").toUpperCase()}</td>
+      <td>${item.jarak_m || "--"} m</td>
+      <td>${item.jumlah_orang || 0}</td>
+      <td>${item.status_mesin || "--"}</td>
+      <td>${item.status_idle || "--"}</td>
+      <td>${item.getaran_g || "--"}</td>
+      <td>${item.sw420_terdeteksi === undefined ? "--" : item.sw420_terdeteksi}</td>
+      <td>${tilt}</td>
+      <td>${gps}</td>
+    </tr>`;
+  }).join("");
+}
+
 function renderStartupChecks(checks) {
   const el = document.getElementById("checklist-list");
   if (!el) return;
@@ -78,14 +108,21 @@ function renderSensorTambahan(data) {
 
   const gpsEl = document.getElementById("sensor-gps");
   const gpsDetailEl = document.getElementById("sensor-gps-detail");
+  const gpsSatellitesEl = document.getElementById("sensor-gps-satellites");
+  const gpsMapEl = document.getElementById("sensor-gps-map");
+  gpsSatellitesEl.textContent = data.gps_satellites ?? "--";
   if (belumAdaData || !data.gps_fix) {
-    gpsEl.textContent = "Tidak ada fix";
+    gpsEl.textContent = data.gps_status || "GPS belum dicek";
     gpsDetailEl.textContent = "Lat: ---.------° / Lon: ---.------°";
+    gpsMapEl.hidden = true;
+    gpsMapEl.removeAttribute("href");
   } else {
     const lat = Number(data.gps_lat || 0);
     const lon = Number(data.gps_lon || 0);
     gpsEl.textContent = `FIX AKTIF`;
     gpsDetailEl.textContent = `Lat: ${lat.toFixed(6)}° / Lon: ${lon.toFixed(6)}°`;
+    gpsMapEl.href = `https://www.openstreetmap.org/?mlat=${lat}&mlon=${lon}#map=17/${lat}/${lon}`;
+    gpsMapEl.hidden = false;
   }
 
   document.getElementById("sensor-last-update").textContent = belumAdaData
@@ -95,6 +132,12 @@ function renderSensorTambahan(data) {
   const banner = document.getElementById("startup-banner");
   if (banner) {
     banner.textContent = data.operator_message || "Sistem siap — menunggu operator menekan start";
+  }
+  const startButton = document.getElementById("start-button");
+  if (startButton) {
+    const active = (data.operator_message || "").includes("aktif");
+    startButton.disabled = active || data.start_requested;
+    startButton.textContent = active ? "DETEKSI AKTIF" : (data.start_requested ? "MENUNGGU START" : "MULAI DETEKSI");
   }
 }
 
@@ -118,6 +161,7 @@ async function perbaruiStatus() {
     document.getElementById("metric-orang").textContent = data.jumlah_orang;
 
     renderEvents(data.events, data.history);
+    renderHistoryTable(data.history);
     renderStartupChecks(data.startup_checks);
     renderSensorTambahan(data);
 
@@ -134,3 +178,14 @@ perbaruiJam();
 perbaruiStatus();
 setInterval(perbaruiJam, 1000);
 setInterval(perbaruiStatus, 500);
+
+document.getElementById("start-button")?.addEventListener("click", async () => {
+  const button = document.getElementById("start-button");
+  button.disabled = true;
+  try {
+    await fetch("/start", { method: "POST" });
+  } catch (err) {
+    button.disabled = false;
+    console.error("Gagal mengirim permintaan start:", err);
+  }
+});

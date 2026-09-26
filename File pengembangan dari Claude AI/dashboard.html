@@ -15,6 +15,7 @@
     <div class="brand">
       <span class="brand-mark">AWAS</span>
       <span class="brand-sub">Deteksi Blind Spot &middot; Alat Berat</span>
+      <span class="brand-team">TIM SALOMO</span>
     </div>
     <div class="topbar-meta">
       <span class="live-dot" id="live-dot"></span>
@@ -25,6 +26,9 @@
   </header>
 
   <div class="startup-banner" id="startup-banner">Sistem siap — menunggu operator menekan start</div>
+  <div class="operator-actions">
+    <button class="start-button" id="start-button" type="button">MULAI DETEKSI</button>
+  </div>
 
   <section class="startup-checklist" id="startup-checklist">
     <div class="checklist-header">CHECKLIST STARTUP</div>
@@ -95,14 +99,38 @@
         <span class="metric-label">GPS</span>
         <span class="metric-value-sm" id="sensor-gps">Tidak ada fix</span>
       </div>
+      <div class="sensor-metric">
+        <span class="metric-label">Satelit</span>
+        <span class="metric-value-sm" id="sensor-gps-satellites">--</span>
+      </div>
       <div class="sensor-metric full-span">
         <span class="metric-label">Lokasi GPS</span>
         <span class="metric-value-sm" id="sensor-gps-detail">Lat: ---.------° / Lon: ---.------°</span>
+        <a class="map-link" id="sensor-gps-map" href="#" target="_blank" rel="noopener" hidden>BUKA PETA</a>
       </div>
       <div class="sensor-metric full-span">
         <span class="metric-label">Kemiringan alat</span>
         <span class="metric-value-sm" id="sensor-tilt">X: ---.--° / Y: ---.--° / STATUS: NORMAL</span>
       </div>
+    </div>
+  </section>
+
+  <section class="history-panel">
+    <div class="history-header">
+      <span class="sensor-panel-title">RIWAYAT TERBARU</span>
+      <span class="sensor-panel-sub">Blind spot + sensor tambahan</span>
+    </div>
+    <div class="history-table-wrap">
+      <table class="history-table">
+        <thead>
+          <tr>
+            <th>Waktu</th><th>Status</th><th>Jarak</th><th>Orang</th>
+            <th>Mesin</th><th>Idle</th><th>Getaran</th><th>SW420</th>
+            <th>Tilt</th><th>GPS</th>
+          </tr>
+        </thead>
+        <tbody id="history-list"></tbody>
+      </table>
     </div>
   </section>
 

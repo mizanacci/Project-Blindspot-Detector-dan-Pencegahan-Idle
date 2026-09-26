@@ -31,6 +31,8 @@ Modul NEO-6M defaultnya kirim banyak jenis sentence NMEA per detik
 sentence lain diabaikan begitu saja, bukan error.
 """
 
+import time
+
 import serial
 import pynmea2
 
@@ -45,6 +47,13 @@ class GPSNeo6M:
         if serial_factory is None:
             serial_factory = serial.Serial
         self.ser = serial_factory(port, baud, timeout=timeout)
+        self.nmea_received = False
+        self.nmea_sentence_count = 0
+        self.gga_received = False
+        self.rmc_received = False
+        self.satellites = None
+        self.last_sentence_time = None
+        self.last_error = None
 
     def baca_lokasi(self, maks_baris=15):
         """
@@ -57,26 +66,71 @@ class GPSNeo6M:
         fix=0 (lat/lon=0.0) kalau tidak ada fix valid ditemukan --
         INI BUKAN KOORDINAT SUNGGUHAN, cuma nilai kosong/placeholder.
         """
+        fix = None
         for _ in range(maks_baris):
             try:
                 mentah = self.ser.readline()
                 baris = mentah.decode("ascii", errors="ignore").strip()
-            except Exception:
+            except Exception as exc:
+                self.last_error = str(exc)
                 continue
 
             if not baris.startswith("$"):
                 continue
+
+            self.nmea_received = True
+            self.nmea_sentence_count += 1
+            self.last_sentence_time = time.strftime("%H:%M:%S")
 
             try:
                 pesan = pynmea2.parse(baris)
             except pynmea2.ParseError:
                 continue  # checksum salah/format rusak -- lewati, jangan crash
 
+            tipe = type(pesan).__name__
+            if tipe == "GGA":
+                self.gga_received = True
+                self.satellites = self._parse_satellites(pesan)
+            elif tipe == "RMC":
+                self.rmc_received = True
+
             hasil = self._ekstrak_fix(pesan)
             if hasil is not None:
-                return hasil
+                fix = hasil
+                break
 
-        return {"fix": 0, "lat": 0.0, "lon": 0.0}
+        if fix is not None:
+            status = "GPS FIX AKTIF"
+        elif self.nmea_received:
+            status = "GPS UART OK - MENUNGGU FIX"
+        elif self.last_error:
+            status = "GPS UART ERROR"
+        else:
+            status = "GPS UART NO DATA"
+
+        return {
+            "fix": 1 if fix is not None else 0,
+            "lat": fix["lat"] if fix is not None else 0.0,
+            "lon": fix["lon"] if fix is not None else 0.0,
+            "status": status,
+            "uart_status": "ERROR" if self.last_error else (
+                "OK" if self.nmea_received else "NO DATA"
+            ),
+            "nmea_received": self.nmea_received,
+            "nmea_sentence_count": self.nmea_sentence_count,
+            "gga_received": self.gga_received,
+            "rmc_received": self.rmc_received,
+            "satellites": self.satellites,
+            "last_sentence_time": self.last_sentence_time,
+        }
+
+    @staticmethod
+    def _parse_satellites(pesan):
+        value = getattr(pesan, "num_sats", None)
+        try:
+            return int(value) if value not in (None, "") else None
+        except (TypeError, ValueError):
+            return None
 
     @staticmethod
     def _ekstrak_fix(pesan):
@@ -87,7 +141,11 @@ class GPSNeo6M:
         status = getattr(pesan, "status", None)
 
         if tipe == "GGA":
-            if gps_qual is not None and int(gps_qual) > 0 and latitude is not None and longitude is not None:
+            try:
+                valid_fix = gps_qual is not None and int(gps_qual) > 0
+            except (TypeError, ValueError):
+                valid_fix = False
+            if valid_fix and latitude is not None and longitude is not None:
                 return {"fix": 1, "lat": float(latitude), "lon": float(longitude)}
         elif tipe == "RMC":
             if status == "A" and latitude is not None and longitude is not None:
