@@ -21,7 +21,12 @@ import threading
 import time
 
 import cv2
-from flask import Flask, Response, jsonify, render_template
+from flask import Flask, Response, jsonify, render_template, send_file
+
+try:
+    from safety_event_engine import SafetyEventEngine
+except ImportError:  # pragma: no cover
+    SafetyEventEngine = None
 
 _DASHBOARD_DIR = os.path.dirname(os.path.abspath(__file__))
 app = Flask(
@@ -73,6 +78,23 @@ class SharedState:
         self.start_requested = False
         self.startup_checks = []
         self.history = []
+        self.safety = {
+            "stationary_vibration": None,
+            "terrain_stability": None,
+            "trip": {"active": False, "total_distance_km": 0.0, "track_points": 0},
+            "gps_status": "MENUNGGU DATA",
+            "last_valid_point": None,
+        }
+        self.vibration_history = []
+        self.tilt_history = []
+        self.route_points = []
+        self.map_events = []
+        self.trip_controls = {
+            "active": False,
+            "status": "IDLE",
+            "distance_km": 0.0,
+            "route_points": 0,
+        }
 
     def update_frame(self, frame_bgr):
         ok, buf = cv2.imencode(".jpg", frame_bgr, [cv2.IMWRITE_JPEG_QUALITY, 80])
@@ -148,6 +170,28 @@ class SharedState:
         with self.lock:
             self.history = list(history_list)
 
+    def update_safety_overview(self, data):
+        with self.lock:
+            self.safety = data or self.safety
+
+    def append_sensor_analytics(self, vibration_rms, tilt_x_deg, tilt_y_deg, gps_lat=None, gps_lon=None):
+        with self.lock:
+            self.vibration_history.append({
+                "timestamp": time.strftime("%H:%M:%S"),
+                "value": float(vibration_rms or 0.0),
+            })
+            self.tilt_history.append({
+                "timestamp": time.strftime("%H:%M:%S"),
+                "tilt_x": float(tilt_x_deg or 0.0),
+                "tilt_y": float(tilt_y_deg or 0.0),
+            })
+            if gps_lat is not None and gps_lon is not None and abs(float(gps_lat)) > 0.0 and abs(float(gps_lon)) > 0.0:
+                self.route_points.append({"lat": float(gps_lat), "lon": float(gps_lon), "timestamp": time.strftime("%H:%M:%S")})
+                if len(self.route_points) > 120:
+                    self.route_points = self.route_points[-120:]
+            self.vibration_history = self.vibration_history[-120:]
+            self.tilt_history = self.tilt_history[-120:]
+
     def snapshot(self):
         with self.lock:
             return {
@@ -181,6 +225,10 @@ class SharedState:
                 "start_requested": self.start_requested,
                 "startup_checks": list(self.startup_checks),
                 "history": list(self.history),
+                "safety": self.safety,
+                "vibration_history": list(self.vibration_history),
+                "tilt_history": list(self.tilt_history),
+                "route_points": list(self.route_points),
             }
 
 
@@ -260,13 +308,52 @@ def status_endpoint():
         limit=8,
     )
     state.update_history(history)
-    return jsonify(state.snapshot())
+    payload = state.snapshot()
+    payload["safety"] = payload.get("safety", {
+        "stationary_vibration": None,
+        "terrain_stability": None,
+        "trip": {"active": False, "total_distance_km": 0.0, "track_points": 0},
+        "gps_status": "MENUNGGU DATA",
+        "last_valid_point": None,
+    })
+    return jsonify(payload)
 
 
 @app.route("/start", methods=["POST"])
 def request_start():
     state.request_start()
     return jsonify({"ok": True, "message": "Permintaan mulai diterima"})
+
+
+@app.route("/trip/start", methods=["POST"])
+def trip_start():
+    if SafetyEventEngine is not None:
+        state.trip_controls["active"] = True
+        state.trip_controls["status"] = "STARTED"
+        if hasattr(state, "safety"):
+            state.safety["trip"] = {"active": True, "status": "STARTED"}
+        return jsonify({"ok": True, "message": "Perjalanan dimulai"})
+    return jsonify({"ok": False, "message": "Event engine unavailable"})
+
+
+@app.route("/trip/end", methods=["POST"])
+def trip_end():
+    if SafetyEventEngine is not None:
+        state.trip_controls["active"] = False
+        state.trip_controls["status"] = "COMPLETED"
+        if hasattr(state, "safety"):
+            state.safety["trip"] = {"active": False, "status": "COMPLETED"}
+        return jsonify({"ok": True, "message": "Perjalanan selesai"})
+    return jsonify({"ok": False, "message": "Event engine unavailable"})
+
+
+@app.route("/download/<path:filename>")
+def download_log(filename):
+    root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    candidate = os.path.join(root_dir, filename)
+    if os.path.exists(candidate):
+        return send_file(candidate, as_attachment=True)
+    return jsonify({"ok": False, "message": "File tidak ditemukan"}), 404
 
 
 def start_dashboard_server(host="0.0.0.0", port=5000):

@@ -1,0 +1,1 @@
+timestamp,event_id,event_type,duration_s,latitude,longitude,gps_status,vibration_rms,vibration_peak,sw420_event_count,machine_state,severity,reason

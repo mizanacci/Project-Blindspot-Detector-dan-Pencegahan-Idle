@@ -199,6 +199,20 @@ def test_gps_reports_fix_and_satellites_from_valid_gga():
     assert result["lon"] > 0
 
 
+def test_trip_tracking_activates_on_valid_fix_and_closes_on_lost_fix():
+    with tempfile.TemporaryDirectory() as directory:
+        engine = main.SafetyEventEngine(base_dir=directory)
+        engine.trip.active = False
+
+        started = main.update_trip_tracking(engine, {"fix": 1, "lat": -6.2, "lon": 106.8, "status": "GPS FIX AKTIF"})
+        assert started["trip_active"] is True
+        assert engine.trip.active is True
+
+        ended = main.update_trip_tracking(engine, {"fix": 0, "lat": 0.0, "lon": 0.0, "status": "GPS UART OK - MENUNGGU FIX"})
+        assert ended["trip_active"] is False
+        assert engine.trip.active is False
+
+
 def test_startup_check_flags_critical_hardware_items():
     checks = main.run_startup_check(
         {"calibration_points": [{"y2": 10, "distance_m": 5.0}]},

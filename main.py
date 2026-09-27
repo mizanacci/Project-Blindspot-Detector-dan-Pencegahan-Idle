@@ -40,6 +40,10 @@ from vibration_sw420 import SW420Sensor
 from gps_neo6m import GPSNeo6M
 from throttle_pattern import LoopThrottle
 from dashboard import start_dashboard_server, state
+try:
+    from safety_event_engine import SafetyEventEngine
+except ImportError:  # pragma: no cover
+    SafetyEventEngine = None
 
 BUZZER_PIN = 22
 LED_HIJAU_PIN = 23     # status: aman
@@ -183,6 +187,29 @@ def urgensi_paling_parah(tracks_aktif, cfg):
     return terparah[1], terparah[2], terparah[0], terparah[3]
 
 
+def update_trip_tracking(engine, gps_lokasi):
+    """Kelola trip berdasarkan valid GPS fix tanpa memblokir blind-spot loop."""
+    if engine is None:
+        return {"trip_active": False, "status": "UNAVAILABLE", "distance_km": 0.0}
+
+    fix = int(gps_lokasi.get('fix', 0) or 0)
+    lat = gps_lokasi.get('lat')
+    lon = gps_lokasi.get('lon')
+    if fix == 1 and lat is not None and lon is not None and abs(float(lat)) > 0.0 and abs(float(lon)) > 0.0:
+        if not engine.trip.active:
+            engine.start_trip(float(lat), float(lon))
+            engine.record_trip_point(float(lat), float(lon))
+            return {"trip_active": True, "status": "STARTED", "distance_km": engine.trip.total_distance_km}
+        engine.record_trip_point(float(lat), float(lon))
+        return {"trip_active": True, "status": "ACTIVE", "distance_km": engine.trip.total_distance_km}
+
+    if engine.trip.active:
+        engine.end_trip(float(lat) if lat is not None else None, float(lon) if lon is not None else None)
+        return {"trip_active": False, "status": "COMPLETED", "distance_km": engine.trip.total_distance_km}
+
+    return {"trip_active": False, "status": "WAITING_FIX", "distance_km": 0.0}
+
+
 def wait_for_operator_start():
     """Mencegah sistem langsung aktif tanpa persetujuan operator."""
     print("\nPanduan mulai sistem:")
@@ -284,6 +311,7 @@ def main():
     tracker = SimpleTracker()
     stabilizer = StatusStabilizer()
     throttle = LoopThrottle(interval_s=1.0)
+    safety_engine = SafetyEventEngine(base_dir=os.path.dirname(__file__)) if SafetyEventEngine is not None else None
 
     try:
         mpu6050 = MPU6050Sensor()
@@ -393,6 +421,26 @@ def main():
                 gps_lokasi['rmc_received'], gps_lokasi['satellites'],
                 gps_lokasi['last_sentence_time']
             )
+
+            trip_state = update_trip_tracking(safety_engine, gps_lokasi)
+            if safety_engine is not None:
+                safety_result = safety_engine.update(
+                    gps_lokasi['fix'], gps_lokasi['lat'], gps_lokasi['lon'], gps_lokasi['status'],
+                    sensor_mpu['getaran_g'], sensor_mpu['getaran_g'], int(sw420_terdeteksi),
+                    sensor_mpu['status_mesin'], sensor_mpu['tilt_x_deg'], sensor_mpu['tilt_y_deg'],
+                    datetime.now().isoformat(timespec='seconds')
+                )
+                if trip_state:
+                    safety_result['trip'] = {
+                        'active': trip_state['trip_active'],
+                        'status': trip_state['status'],
+                        'total_distance_km': trip_state.get('distance_km', safety_result.get('trip', {}).get('total_distance_km', 0.0)),
+                    }
+                state.update_safety_overview(safety_result)
+                state.append_sensor_analytics(
+                    sensor_mpu['getaran_g'], sensor_mpu['tilt_x_deg'], sensor_mpu['tilt_y_deg'],
+                    gps_lokasi['lat'], gps_lokasi['lon']
+                )
 
             timestamp = datetime.now().isoformat(timespec='seconds')
             print(f"[{timestamp}] orang={len(tracks_aktif)}  jarak_terdekat={jarak_m:5.1f}m  "
