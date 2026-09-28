@@ -213,6 +213,50 @@ def test_trip_tracking_activates_on_valid_fix_and_closes_on_lost_fix():
         assert engine.trip.active is False
 
 
+def test_phone_gps_rejects_invalid_payload_and_accepts_valid_payload():
+    from gps_phone import PhoneGPSReceiver
+
+    receiver = PhoneGPSReceiver()
+
+    assert receiver.validate_payload({"latitude": 91, "longitude": 106.8}) is False
+    assert receiver.validate_payload({"latitude": -6.2, "longitude": 106.8, "accuracy_m": 6.0}) is True
+
+    payload = {
+        "latitude": -6.2,
+        "longitude": 106.8,
+        "accuracy_m": 4.8,
+        "altitude_m": 25.4,
+        "speed_mps": 1.2,
+        "timestamp": "2026-09-28T15:40:00",
+    }
+    receiver.update_from_payload(payload)
+    latest = receiver.get_latest()
+    assert latest["fix"] is True
+    assert latest["source"] == "phone"
+    assert latest["latitude"] == -6.2
+
+
+def test_gps_manager_prefers_neo6m_then_phone_then_none():
+    from gps_manager import GPSManager
+
+    device = GPSManager.__new__(GPSManager)
+    device.neo6m = type("Neo", (), {"baca_lokasi": lambda self, maks_baris=15: {"fix": 1, "lat": -6.2, "lon": 106.8, "status": "GPS FIX AKTIF"}})()
+    device.phone = type("Phone", (), {"get_latest": lambda self: {"fix": True, "latitude": -6.1, "longitude": 106.9, "accuracy_m": 5.0, "source": "phone"}})()
+
+    gps = device.get_gps()
+    assert gps["source"] == "neo6m"
+    assert gps["fix"] is True
+
+    device.neo6m = type("Neo", (), {"baca_lokasi": lambda self, maks_baris=15: {"fix": 0, "lat": 0.0, "lon": 0.0, "status": "GPS UART NO DATA"}})()
+    gps = device.get_gps()
+    assert gps["source"] == "phone"
+
+    device.phone = type("Phone", (), {"get_latest": lambda self: {"fix": False, "source": "phone", "latitude": None, "longitude": None}})()
+    gps = device.get_gps()
+    assert gps["fix"] is False
+    assert gps["source"] is None
+
+
 def test_startup_check_flags_critical_hardware_items():
     checks = main.run_startup_check(
         {"calibration_points": [{"y2": 10, "distance_m": 5.0}]},
