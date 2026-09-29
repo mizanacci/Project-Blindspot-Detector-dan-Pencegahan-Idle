@@ -38,8 +38,6 @@ if SENSOR_DIR not in sys.path:
 from mpu6050_sensor import MPU6050Sensor
 from vibration_sw420 import SW420Sensor
 from gps_neo6m import GPSNeo6M
-from gps_manager import GPSManager
-from gps_phone import PhoneGPSReceiver
 from throttle_pattern import LoopThrottle
 from dashboard import start_dashboard_server, state
 try:
@@ -335,13 +333,6 @@ def main():
         gps = None
         print(f"GPS NEO-6M tidak tersedia: {exc}")
 
-    phone_gps = PhoneGPSReceiver(timeout_s=5.0, max_accuracy_m=30.0)
-    gps_manager = GPSManager(neo6m=gps, phone=phone_gps)
-    try:
-        phone_gps.start_server(host="0.0.0.0", port=8765)
-    except Exception as exc:
-        print(f"GPS phone server gagal dimulai: {exc}")
-
     cap = cv2.VideoCapture("/dev/video0", cv2.CAP_V4L2)
 
     cap.set(cv2.CAP_PROP_FOURCC,
@@ -407,7 +398,19 @@ def main():
                 'tilt_status': 'I2C TIDAK TERSEDIA',
             })
             sw420_terdeteksi = sw420.baca_terdeteksi() if sw420 is not None else False
-            gps_lokasi = gps_manager.get_gps()
+            gps_lokasi = gps.baca_lokasi(maks_baris=GPS_MAX_LINES) if gps is not None else {
+                'fix': 0,
+                'lat': 0.0,
+                'lon': 0.0,
+                'status': 'GPS UART ERROR',
+                'uart_status': 'NO DATA',
+                'nmea_received': False,
+                'nmea_sentence_count': 0,
+                'gga_received': False,
+                'rmc_received': False,
+                'satellites': None,
+                'last_sentence_time': None,
+            }
             if not gps_lokasi.get('fix'):
                 gps_lokasi = {
                     'fix': 0, 'lat': 0.0, 'lon': 0.0,
