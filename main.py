@@ -284,47 +284,65 @@ def urgensi_paling_parah(tracks_aktif, cfg):
     return terparah[1], terparah[2], terparah[0], terparah[3]
 
 
-def update_trip_tracking(engine, gps_lokasi, machine_state="TIDAK_PASTI", timestamp=None):
-    """Update one operation trip, keeping it open across temporary GPS loss."""
+def update_trip_tracking(engine, gps_lokasi, timestamp=None):
+    """Append a valid GPS point to the already-active prototype trip."""
     if engine is None:
         return {"trip_active": False, "status": "UNAVAILABLE", "distance_km": 0.0}
 
     timestamp = timestamp or datetime.now().isoformat(timespec='seconds')
+    if not engine.trip.active:
+        trip = engine.trip.snapshot()
+        trip["status"] = "WAITING_FOR_START"
+        return {
+            "trip_active": False,
+            "status": "WAITING_FOR_START",
+            "distance_km": trip["total_distance_km"],
+            "trip_id": trip["trip_id"],
+            "trip": trip,
+        }
+
     fix = int(gps_lokasi.get('fix', 0) or 0)
     lat = gps_lokasi.get('lat')
     lon = gps_lokasi.get('lon')
     point = engine.trip.valid_gps_point(fix == 1, lat, lon)
-    gps_status = "GPS_VALID" if point is not None else "NO_FIX"
-    status = "WAITING_FOR_OPERATION"
-
-    if engine.trip.active and machine_state == "MATI":
-        engine.end_trip(
-            point[0] if point is not None else None,
-            point[1] if point is not None else None,
-            timestamp=timestamp,
-            gps_status=gps_status,
-        )
-        status = "COMPLETED"
-    elif engine.trip.active:
-        if point is not None:
-            engine.record_trip_point(*point, timestamp=timestamp, gps_status=gps_status)
-        status = "ACTIVE"
-    elif machine_state == "ON" and point is not None:
-        engine.start_trip(*point, timestamp=timestamp, gps_status=gps_status)
-        status = "STARTED"
-    elif point is None:
-        status = "WAITING_FIX"
+    if point is not None:
+        engine.record_trip_point(*point, timestamp=timestamp, gps_status="GPS_VALID")
 
     trip = engine.trip.snapshot()
-    trip["status"] = status
+    trip["status"] = "ACTIVE"
     return {
-        "trip_active": trip["active"],
-        "status": status,
+        "trip_active": True,
+        "status": "ACTIVE",
         "distance_km": trip["total_distance_km"],
         "trip_id": trip["trip_id"],
         "trip": trip,
-        "summary": engine.trip.summary_text() if status == "COMPLETED" else None,
     }
+
+
+def start_operation_trip(engine, timestamp=None):
+    """Start one prototype session independently of machine state or GPS fix."""
+    if engine is None:
+        return None
+    return engine.start_trip(
+        timestamp=timestamp or datetime.now().isoformat(timespec='seconds'),
+        gps_status="NO_FIX",
+    )
+
+
+def stop_operation_trip(engine, gps_lokasi=None, timestamp=None):
+    """Close the runtime trip once, using the last accepted point if GPS is lost."""
+    if engine is None or not engine.trip.active:
+        return None
+    gps_lokasi = gps_lokasi or {}
+    point = engine.trip.valid_gps_point(
+        gps_lokasi.get("fix"), gps_lokasi.get("lat"), gps_lokasi.get("lon")
+    )
+    return engine.end_trip(
+        point[0] if point is not None else None,
+        point[1] if point is not None else None,
+        timestamp=timestamp or datetime.now().isoformat(timespec='seconds'),
+        gps_status="GPS_VALID" if point is not None else "NO_FIX",
+    )
 
 
 def wait_for_operator_start():
@@ -491,6 +509,11 @@ def main():
     orang_terdeteksi = []  # cache hasil deteksi terakhir, dipakai ulang saat frame di-skip
 
     try:
+        if safety_engine is not None and not safety_engine.trip.active:
+            startup_timestamp = datetime.now().isoformat(timespec='seconds')
+            startup_trip = start_operation_trip(safety_engine, startup_timestamp)
+            print(f"Trip operasi dimulai: {startup_trip['trip_id']}")
+
         while True:
             throttle.mulai_siklus()
             ret, frame = cap.read()
@@ -555,9 +578,7 @@ def main():
             )
 
             cycle_timestamp = datetime.now().isoformat(timespec='seconds')
-            trip_state = update_trip_tracking(
-                safety_engine, gps_lokasi, sensor_mpu['status_mesin'], cycle_timestamp
-            )
+            trip_state = update_trip_tracking(safety_engine, gps_lokasi, cycle_timestamp)
             if safety_engine is not None:
                 safety_result = safety_engine.update(
                     gps_lokasi['fix'], gps_lokasi['lat'], gps_lokasi['lon'], gps_lokasi['status'],
@@ -580,9 +601,6 @@ def main():
                     sensor_mpu['getaran_g'], sensor_mpu['tilt_x_deg'], sensor_mpu['tilt_y_deg'],
                     gps_lokasi['lat'], gps_lokasi['lon']
                 )
-            if trip_state.get('status') == "COMPLETED":
-                print(trip_state["summary"])
-
             timestamp = datetime.now().isoformat(timespec='seconds')
             print(f"[{timestamp}] orang={len(tracks_aktif)}  jarak_terdekat={jarak_m:5.1f}m  "
                   f"durasi_terlama={durasi_s:5.1f}s  skor={skor:5.1f}  "
@@ -625,14 +643,12 @@ def main():
                     final_gps = gps.baca_lokasi(maks_baris=GPS_MAX_LINES)
                 except Exception as exc:
                     print(f"GPS final tidak dapat dibaca: {exc}")
-            final_trip = update_trip_tracking(
+            stop_operation_trip(
                 safety_engine,
                 final_gps,
-                machine_state="MATI",
                 timestamp=datetime.now().isoformat(timespec='seconds'),
             )
-            if final_trip.get("summary"):
-                print(final_trip["summary"])
+            print(safety_engine.trip.summary_text())
         if can_use_gui():
             cv2.destroyAllWindows()
         buzzer.close(); led_hijau.off(); led_kuning.off(); led_merah.off()

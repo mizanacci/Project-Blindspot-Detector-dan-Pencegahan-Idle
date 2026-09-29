@@ -344,18 +344,6 @@ for (const button of document.querySelectorAll(".download-btn")) {
   });
 }
 
-document.getElementById("trip-start-button")?.addEventListener("click", async () => {
-  try {
-    await fetch("/trip/start", { method: "POST" });
-  } catch (err) { console.error("Gagal memulai perjalanan:", err); }
-});
-
-document.getElementById("trip-end-button")?.addEventListener("click", async () => {
-  try {
-    await fetch("/trip/end", { method: "POST" });
-  } catch (err) { console.error("Gagal mengakhiri perjalanan:", err); }
-});
-
 document.getElementById("start-button")?.addEventListener("click", async () => {
   const button = document.getElementById("start-button");
   button.disabled = true;

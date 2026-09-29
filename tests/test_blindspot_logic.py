@@ -201,56 +201,116 @@ def test_gps_reports_fix_and_satellites_from_valid_gga():
     assert result["lon"] > 0
 
 
-def test_trip_tracking_stays_active_on_gps_loss_and_closes_when_machine_stops():
+def test_prototype_trip_starts_without_gps_and_survives_gps_loss_until_shutdown():
+    import csv
+
     with tempfile.TemporaryDirectory() as directory:
         engine = main.SafetyEventEngine(base_dir=directory)
-        engine.trip.active = False
+        started = main.start_operation_trip(engine, "2026-09-29T08:00:00")
+        trip_id = started["trip_id"]
+        assert started["active"] is True
+        assert started["gps_start_status"] == "NO_FIX"
+        assert started["start_lat"] is None
+        assert started["start_lon"] is None
 
-        no_fix = main.update_trip_tracking(
+        for second in (1, 2):
+            state = main.update_trip_tracking(
+                engine, {"fix": 0, "lat": 0.0, "lon": 0.0},
+                timestamp=f"2026-09-29T08:00:0{second}",
+            )
+            assert state["trip_active"] is True
+            assert state["trip_id"] == trip_id
+            assert state["distance_km"] == 0.0
+
+        point_a = main.update_trip_tracking(
+            engine, {"fix": 1, "lat": -1.0, "lon": 116.0},
+            timestamp="2026-09-29T08:00:03",
+        )
+        assert point_a["trip_id"] == trip_id
+        assert point_a["trip"]["start_lat"] == -1.0
+        assert point_a["trip"]["start_lon"] == 116.0
+        distance_before_gap = point_a["distance_km"]
+
+        for second in (4, 5):
+            gap = main.update_trip_tracking(
+                engine, {"fix": 0, "lat": 0.0, "lon": 0.0},
+                timestamp=f"2026-09-29T08:00:0{second}",
+            )
+            assert gap["trip_active"] is True
+            assert gap["trip_id"] == trip_id
+            assert gap["distance_km"] == distance_before_gap
+
+        point_b = main.update_trip_tracking(
+            engine, {"fix": 1, "lat": -1.0, "lon": 116.0001},
+            timestamp="2026-09-29T08:00:06",
+        )
+        assert point_b["trip_id"] == trip_id
+        assert point_b["distance_km"] > distance_before_gap
+
+        ended = main.stop_operation_trip(
             engine,
             {"fix": 0, "lat": 0.0, "lon": 0.0},
-            machine_state="ON",
-            timestamp="2026-09-29T07:59:00",
+            timestamp="2026-09-29T08:00:07",
         )
-        assert no_fix["trip_active"] is False
-        assert no_fix["status"] == "WAITING_FIX"
-        machine_off = main.update_trip_tracking(
-            engine,
-            {"fix": 1, "lat": -6.2, "lon": 106.8},
-            machine_state="MATI",
-            timestamp="2026-09-29T07:59:30",
-        )
-        assert machine_off["trip_active"] is False
-        assert machine_off["status"] == "WAITING_FOR_OPERATION"
+        assert ended["active"] is False
+        assert ended["end_lat"] == -1.0
+        assert ended["end_lon"] == 116.0001
+        assert ended["gps_end_status"] == "LAST_VALID_POINT"
+        assert ended["total_distance_km"] == point_b["distance_km"]
 
-        started = main.update_trip_tracking(
-            engine,
-            {"fix": 1, "lat": -6.2, "lon": 106.8, "status": "GPS FIX AKTIF"},
-            machine_state="ON",
-            timestamp="2026-09-29T08:00:00",
+        main.stop_operation_trip(
+            engine, {"fix": 0, "lat": 0.0, "lon": 0.0},
+            timestamp="2026-09-29T08:00:08",
         )
-        assert started["trip_active"] is True
-        assert started["trip"]["start_lat"] == -6.2
-        assert engine.trip.active is True
+        with open(os.path.join(directory, "log_trip_details.csv"), newline="") as handle:
+            summaries = [
+                row for row in csv.DictReader(handle)
+                if row["record_type"] == "TRIP_SUMMARY"
+            ]
+        assert len(summaries) == 1
+        assert summaries[0]["trip_id"] == trip_id
+        assert summaries[0]["end_latitude"] == "-1.0"
+        assert summaries[0]["end_longitude"] == "116.0001"
 
-        gps_lost = main.update_trip_tracking(
-            engine,
-            {"fix": 0, "lat": 0.0, "lon": 0.0, "status": "GPS UART OK - MENUNGGU FIX"},
-            machine_state="ON",
-            timestamp="2026-09-29T08:00:10",
-        )
-        assert gps_lost["trip_active"] is True
-        assert gps_lost["trip"]["end_lat"] is None
 
-        ended = main.update_trip_tracking(
-            engine,
-            {"fix": 0, "lat": 0.0, "lon": 0.0, "status": "GPS UART OK - MENUNGGU FIX"},
-            machine_state="MATI",
-            timestamp="2026-09-29T08:01:00",
-        )
-        assert ended["trip_active"] is False
-        assert engine.trip.active is False
-        assert ended["trip"]["gps_end_status"] == "NO_FIX"
+def test_two_prototype_cycles_keep_separate_ids_and_one_summary_each():
+    import csv
+
+    with tempfile.TemporaryDirectory() as directory:
+        engine = main.SafetyEventEngine(base_dir=directory)
+        cycle_trip_ids = []
+        for cycle, first_lon, last_lon in ((1, 116.0, 116.0001), (2, 117.0, 117.0001)):
+            started = main.start_operation_trip(
+                engine, f"2026-09-29T0{cycle}:00:00",
+            )
+            cycle_trip_ids.append(started["trip_id"])
+            main.update_trip_tracking(
+                engine,
+                {"fix": 1, "lat": -1.0, "lon": first_lon},
+                timestamp=f"2026-09-29T0{cycle}:00:01",
+            )
+            main.update_trip_tracking(
+                engine,
+                {"fix": 1, "lat": -1.0, "lon": last_lon},
+                timestamp=f"2026-09-29T0{cycle}:00:02",
+            )
+            ended = main.stop_operation_trip(
+                engine,
+                {"fix": 1, "lat": -1.0, "lon": last_lon},
+                timestamp=f"2026-09-29T0{cycle}:00:03",
+            )
+            assert ended["active"] is False
+            assert ended["gps_end_status"] == "GPS_VALID"
+            assert ended["end_lon"] == last_lon
+
+        assert cycle_trip_ids[0] != cycle_trip_ids[1]
+        with open(os.path.join(directory, "log_trip_details.csv"), newline="") as handle:
+            summaries = [
+                row for row in csv.DictReader(handle)
+                if row["record_type"] == "TRIP_SUMMARY"
+            ]
+        assert len(summaries) == 2
+        assert {row["trip_id"] for row in summaries} == set(cycle_trip_ids)
 
 
 def test_trip_tracker_persists_start_movement_end_and_summary():
@@ -332,9 +392,9 @@ def test_trip_tracker_closes_without_fix_and_multiple_trips_do_not_mix():
 
         ended = trip.end_trip(timestamp="2026-09-29T08:00:20", gps_status="NO_FIX")
         assert ended["active"] is False
-        assert ended["end_lat"] is None
-        assert ended["end_lon"] is None
-        assert ended["gps_end_status"] == "NO_FIX"
+        assert ended["end_lat"] == -1.0
+        assert ended["end_lon"] == 116.0001
+        assert ended["gps_end_status"] == "LAST_VALID_POINT"
         assert ended["total_distance_km"] == pytest.approx(first_distance, abs=1e-6)
 
         second = trip.start_trip(-1.0, 116.0, timestamp="2026-09-29T09:00:00")

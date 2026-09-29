@@ -23,11 +23,6 @@ import time
 import cv2
 from flask import Flask, Response, jsonify, render_template, send_file
 
-try:
-    from safety_event_engine import SafetyEventEngine
-except ImportError:  # pragma: no cover
-    SafetyEventEngine = None
-
 _DASHBOARD_DIR = os.path.dirname(os.path.abspath(__file__))
 app = Flask(
     __name__,
@@ -89,13 +84,6 @@ class SharedState:
         self.tilt_history = []
         self.route_points = []
         self.map_events = []
-        self.trip_controls = {
-            "active": False,
-            "status": "IDLE",
-            "distance_km": 0.0,
-            "route_points": 0,
-        }
-
     def update_frame(self, frame_bgr):
         ok, buf = cv2.imencode(".jpg", frame_bgr, [cv2.IMWRITE_JPEG_QUALITY, 80])
         if ok:
@@ -323,28 +311,6 @@ def status_endpoint():
 def request_start():
     state.request_start()
     return jsonify({"ok": True, "message": "Permintaan mulai diterima"})
-
-
-@app.route("/trip/start", methods=["POST"])
-def trip_start():
-    if SafetyEventEngine is not None:
-        state.trip_controls["active"] = True
-        state.trip_controls["status"] = "STARTED"
-        if hasattr(state, "safety"):
-            state.safety["trip"] = {"active": True, "status": "STARTED"}
-        return jsonify({"ok": True, "message": "Perjalanan dimulai"})
-    return jsonify({"ok": False, "message": "Event engine unavailable"})
-
-
-@app.route("/trip/end", methods=["POST"])
-def trip_end():
-    if SafetyEventEngine is not None:
-        state.trip_controls["active"] = False
-        state.trip_controls["status"] = "COMPLETED"
-        if hasattr(state, "safety"):
-            state.safety["trip"] = {"active": False, "status": "COMPLETED"}
-        return jsonify({"ok": True, "message": "Perjalanan selesai"})
-    return jsonify({"ok": False, "message": "Event engine unavailable"})
 
 
 @app.route("/download/<path:filename>")

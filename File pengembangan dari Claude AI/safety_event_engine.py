@@ -143,13 +143,14 @@ class TripTracker:
             return self.snapshot()
         point = self.valid_gps_point(gps_status == "GPS_VALID", lat, lon)
         if point is None:
-            return None
+            gps_status = "NO_FIX"
 
         now = timestamp or datetime.now().astimezone().isoformat(timespec="seconds")
         self.active = True
         self.start_time = now
         self.end_time = None
-        self.start_lat, self.start_lon = point
+        self.start_lat = point[0] if point is not None else None
+        self.start_lon = point[1] if point is not None else None
         self.end_lat = None
         self.end_lon = None
         self.trip_id = f"trip-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:6]}"
@@ -159,8 +160,11 @@ class TripTracker:
         self._gps_start_status = gps_status
         self._gps_end_status = None
         self._last_point = point
-        self._append_log(now, "START", point[0], point[1], 0.0, 0, "ACTIVE")
-        self._append_track_point(point, now, 0.0, gps_status)
+        self._append_log(
+            now, "START", self.start_lat, self.start_lon, 0.0, 0, "ACTIVE"
+        )
+        if point is not None:
+            self._append_track_point(point, now, 0.0, gps_status)
         return self.snapshot()
 
     def update_position(self, lat, lon, now=None, gps_status="GPS_VALID"):
@@ -176,6 +180,9 @@ class TripTracker:
                 return False
         else:
             distance_m = 0.0
+            if self.start_lat is None or self.start_lon is None:
+                self.start_lat, self.start_lon = point
+                self._gps_start_status = "GPS_VALID"
         self.total_distance_km += distance_m / 1000.0
         self._last_point = point
         self._append_track_point(point, timestamp, distance_m, gps_status)
@@ -187,10 +194,13 @@ class TripTracker:
         now = timestamp or datetime.now().astimezone().isoformat(timespec="seconds")
         end_status = gps_status or ("GPS_VALID" if lat is not None and lon is not None else "NO_FIX")
         point = self.valid_gps_point(end_status == "GPS_VALID", lat, lon)
-        if point is None:
-            end_status = "NO_FIX"
-        else:
+        if point is not None:
             self.update_position(point[0], point[1], now=now, gps_status="GPS_VALID")
+        elif self._last_point is not None:
+            point = self._last_point
+            end_status = "LAST_VALID_POINT"
+        else:
+            end_status = "NO_FIX"
 
         self.end_time = now
         self.end_lat = point[0] if point is not None else None
