@@ -540,8 +540,8 @@ def main():
             sw420_terdeteksi = sw420.baca_terdeteksi() if sw420 is not None else False
             gps_lokasi = gps.baca_lokasi(maks_baris=GPS_MAX_LINES) if gps is not None else {
                 'fix': 0,
-                'lat': 0.0,
-                'lon': 0.0,
+                'lat': None,
+                'lon': None,
                 'status': 'GPS UART ERROR',
                 'uart_status': 'NO DATA',
                 'nmea_received': False,
@@ -553,7 +553,7 @@ def main():
             }
             if not gps_lokasi.get('fix'):
                 gps_lokasi = {
-                    'fix': 0, 'lat': 0.0, 'lon': 0.0,
+                    'fix': 0, 'lat': None, 'lon': None,
                     'status': gps_lokasi.get('status', 'GPS UART ERROR'),
                     'uart_status': 'NO DATA',
                     'nmea_received': False, 'nmea_sentence_count': 0,
@@ -602,6 +602,11 @@ def main():
                     gps_lokasi['lat'], gps_lokasi['lon']
                 )
             timestamp = datetime.now().isoformat(timespec='seconds')
+            gps_coordinates = (
+                f"({gps_lokasi['lat']:.6f}, {gps_lokasi['lon']:.6f})"
+                if gps_lokasi['lat'] is not None and gps_lokasi['lon'] is not None
+                else "(NO FIX)"
+            )
             print(f"[{timestamp}] orang={len(tracks_aktif)}  jarak_terdekat={jarak_m:5.1f}m  "
                   f"durasi_terlama={durasi_s:5.1f}s  skor={skor:5.1f}  "
                   f"mentah={status_mentah:7s} -> STABIL={status_stabil.upper()}")
@@ -614,7 +619,7 @@ def main():
                 f"SW420={sw420_terdeteksi}  "
                 f"GPS={gps_lokasi['status']}  "
                 f"sat={gps_lokasi['satellites'] or '-'}  "
-                f"({gps_lokasi['lat']:.6f}, {gps_lokasi['lon']:.6f})")
+                f"{gps_coordinates}")
 
             log_reading([
                 timestamp, len(tracks_aktif), round(jarak_m, 1),

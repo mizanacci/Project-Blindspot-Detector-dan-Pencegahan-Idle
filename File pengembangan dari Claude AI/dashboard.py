@@ -74,6 +74,12 @@ class SharedState:
         self.startup_checks = []
         self.history = []
         self.safety = {
+            "idle_event": None,
+            "idle_state": "NORMAL",
+            "idle_duration_s": 0.0,
+            "potential_landslide": None,
+            "new_idle_event": False,
+            "new_landslide_event": False,
             "stationary_vibration": None,
             "terrain_stability": None,
             "trip": {"active": False, "total_distance_km": 0.0, "track_points": 0},
@@ -298,6 +304,12 @@ def status_endpoint():
     state.update_history(history)
     payload = state.snapshot()
     payload["safety"] = payload.get("safety", {
+        "idle_event": None,
+        "idle_state": "NORMAL",
+        "idle_duration_s": 0.0,
+        "potential_landslide": None,
+        "new_idle_event": False,
+        "new_landslide_event": False,
         "stationary_vibration": None,
         "terrain_stability": None,
         "trip": {"active": False, "total_distance_km": 0.0, "track_points": 0},

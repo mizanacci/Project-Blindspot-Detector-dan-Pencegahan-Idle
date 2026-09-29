@@ -318,6 +318,7 @@ class SafetyEventEngine:
         "gps_status", "vibration_g", "vibration_threshold_g",
         "tilt_deg", "tilt_threshold_deg", "tilt_x_deg", "tilt_y_deg",
         "tilt_reference_valid", "sw420_detected", "machine_state", "message",
+        "trigger_reason",
     ]
 
     def __init__(self, base_dir=".", config=None, clock=None):
@@ -460,6 +461,7 @@ class SafetyEventEngine:
             event.get("sw420_detected"),
             event.get("machine_state"),
             event.get("message"),
+            event.get("trigger_reason"),
         ])
 
     def _reset_idle_candidate(self):
@@ -473,17 +475,21 @@ class SafetyEventEngine:
     def _close_idle_session(self, now_monotonic, timestamp, end_point):
         if self._idle_state == "IDLE_ACTIVE" and self._idle_event is not None:
             duration_s = max(0.0, now_monotonic - self._idle_started_monotonic)
+            last_valid_point = end_point or self._gps_last_valid
+            end_gps_status = "GPS_VALID" if end_point is not None else (
+                "LAST_VALID_POINT" if last_valid_point is not None else "NO_FIX"
+            )
             self._idle_event.update({
                 "active": False,
                 "timestamp_end": timestamp,
                 "duration_s": round(duration_s, 1),
-                "end_latitude": end_point[0] if end_point is not None else None,
-                "end_longitude": end_point[1] if end_point is not None else None,
-                "gps_status": "GPS_VALID" if end_point is not None else "NO_FIX",
+                "end_latitude": last_valid_point[0] if last_valid_point is not None else None,
+                "end_longitude": last_valid_point[1] if last_valid_point is not None else None,
+                "gps_status": end_gps_status,
             })
             self._write_safety_event(
-                self._idle_event, "END", timestamp, end_point=end_point,
-                gps_status=self._idle_event["gps_status"], duration_s=duration_s,
+                self._idle_event, "END", timestamp, end_point=last_valid_point,
+                gps_status=end_gps_status, duration_s=duration_s,
             )
             self._idle_last_event = dict(self._idle_event)
         self._reset_idle_candidate()
@@ -491,8 +497,11 @@ class SafetyEventEngine:
     def _update_idle(self, now_monotonic, timestamp, point, sw420_active,
                      vibration_g, machine_state, trip_id):
         new_idle_event = False
+        machine_state = str(machine_state).upper()
+        machine_on = machine_state == "ON" or sw420_active
+        machine_off = machine_state in {"MATI", "OFF", "STOP"}
         if self._idle_state == "NORMAL":
-            if sw420_active and point is not None:
+            if machine_on:
                 self._idle_state = "IDLE_CANDIDATE"
                 self._idle_started_monotonic = now_monotonic
                 self._idle_started_at = timestamp
@@ -500,14 +509,23 @@ class SafetyEventEngine:
             else:
                 return False
 
-        distance_m = self._haversine_m(self._idle_reference_point, point) if point is not None else float("inf")
-        still_vibrating = sw420_active
-        still_stationary = point is not None and distance_m <= self.config["IDLE_DISTANCE_THRESHOLD_M"]
-        if not still_vibrating or not still_stationary:
+        if machine_off:
+            self._close_idle_session(now_monotonic, timestamp, point)
+            return False
+
+        if point is not None and self._idle_reference_point is None:
+            self._idle_reference_point = point
+        if (point is not None and self._idle_reference_point is not None and
+                self._haversine_m(self._idle_reference_point, point) >
+                self.config["IDLE_DISTANCE_THRESHOLD_M"]):
             self._close_idle_session(now_monotonic, timestamp, point)
             return False
 
         duration_s = max(0.0, now_monotonic - self._idle_started_monotonic)
+        event_point = point or self._idle_reference_point or self._gps_last_valid
+        event_gps_status = "GPS_VALID" if point is not None else (
+            "LAST_VALID_POINT" if event_point is not None else "NO_FIX"
+        )
         if self._idle_state == "IDLE_CANDIDATE" and duration_s >= self.config["IDLE_DURATION_THRESHOLD_S"]:
             self._idle_state = "IDLE_ACTIVE"
             self._idle_event = {
@@ -518,11 +536,11 @@ class SafetyEventEngine:
                 "timestamp_start": self._idle_started_at,
                 "timestamp_detected": timestamp,
                 "duration_s": round(duration_s, 1),
-                "latitude": self._idle_reference_point[0],
-                "longitude": self._idle_reference_point[1],
-                "gps_status": "GPS_VALID",
+                "latitude": event_point[0] if event_point is not None else None,
+                "longitude": event_point[1] if event_point is not None else None,
+                "gps_status": event_gps_status,
                 "vibration_g": round(float(vibration_g), 4),
-                "sw420_detected": True,
+                "sw420_detected": bool(sw420_active),
                 "machine_state": machine_state,
                 "message": "SEGERA MATIKAN MESIN AGAR BAHAN BAKAR LEBIH HEMAT",
             }
@@ -531,6 +549,10 @@ class SafetyEventEngine:
             self._idle_last_event = dict(self._idle_event)
             new_idle_event = True
         elif self._idle_state == "IDLE_ACTIVE":
+            if event_point is not None:
+                self._idle_event["latitude"] = event_point[0]
+                self._idle_event["longitude"] = event_point[1]
+            self._idle_event["gps_status"] = event_gps_status
             self._idle_event["duration_s"] = round(duration_s, 1)
             self._idle_event["vibration_g"] = round(float(vibration_g), 4)
             self._idle_event["machine_state"] = machine_state
@@ -548,7 +570,15 @@ class SafetyEventEngine:
         tilt_deg = max(abs(float(tilt_x)), abs(float(tilt_y)))
         heavy_vibration = float(vibration_g) > vibration_threshold
         excessive_tilt = bool(tilt_valid) and tilt_deg > tilt_threshold
-        condition = heavy_vibration and excessive_tilt
+        condition = heavy_vibration or excessive_tilt
+        if heavy_vibration and excessive_tilt:
+            trigger_reason = "GETARAN DAN KEMIRINGAN MELEBIHI THRESHOLD"
+        elif heavy_vibration:
+            trigger_reason = "GETARAN MELEBIHI THRESHOLD"
+        elif excessive_tilt:
+            trigger_reason = "KEMIRINGAN MELEBIHI THRESHOLD"
+        else:
+            trigger_reason = None
         new_event = False
 
         if condition and not self._landslide_latched:
@@ -572,11 +602,11 @@ class SafetyEventEngine:
                 "sw420_detected": bool(sw420_active),
                 "machine_state": machine_state,
                 "message": "POTENSI LONGSOR TERDETEKSI",
+                "trigger_reason": trigger_reason,
             }
             self._write_safety_event(self._landslide_event, "DETECTED", timestamp)
             new_event = True
-        elif (tilt_valid and not heavy_vibration and not excessive_tilt and
-              self._landslide_latched):
+        elif not condition and self._landslide_latched:
             self._landslide_latched = False
             self._landslide_event["active"] = False
             self._landslide_event["timestamp_end"] = timestamp
@@ -624,7 +654,6 @@ class SafetyEventEngine:
             terrain_event = {
                 **landslide_event,
                 "severity": "POTENSI LONGSOR",
-                "trigger_reason": "heavy vibration and excessive tilt",
             }
 
         return {

@@ -135,6 +135,31 @@
       </div>
     </section>
 
+    <section class="safety-alerts" id="safety-alerts" aria-live="polite">
+      <article class="safety-alert idle-alert" id="idle-alert" hidden>
+        <div class="safety-alert-title">PERINGATAN IDLE</div>
+        <strong id="idle-alert-message">SEGERA MATIKAN MESIN AGAR BAHAN BAKAR LEBIH HEMAT</strong>
+        <div class="safety-alert-details">
+          <span>Durasi: <b id="idle-alert-duration">00:00</b></span>
+          <span>Mesin: <b id="idle-alert-machine">--</b></span>
+          <span>GPS: <b id="idle-alert-gps-status">--</b></span>
+          <span>Lokasi: <b id="idle-alert-location">NO FIX</b></span>
+          <span>Waktu: <b id="idle-alert-time">--</b></span>
+        </div>
+      </article>
+      <article class="safety-alert terrain-alert" id="terrain-alert" hidden>
+        <div class="safety-alert-title">POTENSI LONGSOR TERDETEKSI</div>
+        <strong id="terrain-alert-reason">--</strong>
+        <div class="safety-alert-details">
+          <span>Getaran: <b id="terrain-alert-vibration">--</b> / <b id="terrain-alert-vibration-threshold">--</b> g</span>
+          <span>Tilt: <b id="terrain-alert-tilt">--</b> / <b id="terrain-alert-tilt-threshold">--</b>°</span>
+          <span>X/Y: <b id="terrain-alert-xy">--</b></span>
+          <span>GPS: <b id="terrain-alert-location">NO FIX</b></span>
+          <span>Waktu: <b id="terrain-alert-time">--</b></span>
+        </div>
+      </article>
+    </section>
+
     <section class="analytics-grid">
       <div class="panel chart-panel">
         <div class="panel-header"><span>GRAFIK GETARAN</span><span id="vibration-header">MPU6050 OFFLINE</span></div>

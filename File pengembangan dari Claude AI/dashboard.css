@@ -32,6 +32,17 @@ button { font-family: var(--font-mono); }
 .live-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--status-aman); display: inline-block; }
 
 .startup-banner, .startup-checklist, .panel, .card-panel, .sensor-panel, .history-panel { background: var(--bg-panel); border: 1px solid var(--border-subtle); border-radius: 6px; }
+.safety-alerts { display: grid; gap: 10px; margin: 12px 28px 0; }
+.safety-alert { padding: 12px 14px; border: 1px solid; border-radius: 6px; background: var(--bg-panel); }
+.safety-alert[hidden] { display: none; }
+.safety-alert-title { font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.08em; margin-bottom: 6px; }
+.safety-alert strong { display: block; font-family: var(--font-mono); font-size: 14px; }
+.safety-alert-details { display: flex; flex-wrap: wrap; gap: 8px 18px; margin-top: 8px; color: var(--text-secondary); font-size: 12px; }
+.safety-alert-details b { color: var(--text-primary); font-family: var(--font-mono); }
+.idle-alert { border-color: rgba(224,164,0,0.65); }
+.idle-alert .safety-alert-title { color: var(--status-siaga); }
+.terrain-alert { border-color: rgba(224,48,61,0.75); }
+.terrain-alert .safety-alert-title { color: var(--status-bahaya); }
 .startup-banner { margin: 12px 28px 0; padding: 10px 12px; font-family: var(--font-mono); font-size: 12px; }
 .startup-checklist { margin: 12px 28px 0; padding: 12px 14px; }
 .checklist-header { color: var(--text-secondary); font-size: 11px; letter-spacing: 0.08em; margin-bottom: 8px; }

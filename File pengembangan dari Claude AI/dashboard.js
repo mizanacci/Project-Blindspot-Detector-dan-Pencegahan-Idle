@@ -61,6 +61,42 @@ function renderEvents(events, history) {
   }).join("");
 }
 
+function renderSafetyWarnings(data) {
+  const safety = data.safety || {};
+  const idleEvent = safety.idle_event;
+  const terrainEvent = safety.potential_landslide;
+  const idleAlert = document.getElementById("idle-alert");
+  const terrainAlert = document.getElementById("terrain-alert");
+  const formatLocation = (event) => event?.latitude != null && event?.longitude != null
+    ? `${Number(event.latitude).toFixed(6)}, ${Number(event.longitude).toFixed(6)}` : "NO FIX";
+
+  if (idleAlert) {
+    idleAlert.hidden = !(idleEvent?.active);
+    if (idleEvent?.active) {
+      document.getElementById("idle-alert-message").textContent = idleEvent.message || "SEGERA MATIKAN MESIN AGAR BAHAN BAKAR LEBIH HEMAT";
+      document.getElementById("idle-alert-duration").textContent = formatDurasi(safety.idle_duration_s ?? idleEvent.duration_s);
+      document.getElementById("idle-alert-machine").textContent = idleEvent.machine_state || data.status_mesin || "--";
+      document.getElementById("idle-alert-gps-status").textContent = idleEvent.gps_status || safety.gps_status || "NO_FIX";
+      document.getElementById("idle-alert-location").textContent = formatLocation(idleEvent);
+      document.getElementById("idle-alert-time").textContent = idleEvent.timestamp_detected || idleEvent.timestamp_start || "--";
+    }
+  }
+
+  if (terrainAlert) {
+    terrainAlert.hidden = !(terrainEvent?.active);
+    if (terrainEvent?.active) {
+      document.getElementById("terrain-alert-reason").textContent = terrainEvent.trigger_reason || "KONDISI TERRAIN MELEBIHI THRESHOLD";
+      document.getElementById("terrain-alert-vibration").textContent = Number(terrainEvent.vibration_g || 0).toFixed(3);
+      document.getElementById("terrain-alert-vibration-threshold").textContent = Number(terrainEvent.vibration_threshold_g || 0).toFixed(3);
+      document.getElementById("terrain-alert-tilt").textContent = Number(terrainEvent.tilt_deg || 0).toFixed(1);
+      document.getElementById("terrain-alert-tilt-threshold").textContent = Number(terrainEvent.tilt_threshold_deg || 0).toFixed(1);
+      document.getElementById("terrain-alert-xy").textContent = `${Number(terrainEvent.tilt_x_deg || 0).toFixed(1)}° / ${Number(terrainEvent.tilt_y_deg || 0).toFixed(1)}°`;
+      document.getElementById("terrain-alert-location").textContent = formatLocation(terrainEvent);
+      document.getElementById("terrain-alert-time").textContent = terrainEvent.timestamp || "--";
+    }
+  }
+}
+
 function renderHistoryTable(history) {
   const el = document.getElementById("history-list");
   if (!el) return;
@@ -164,10 +200,19 @@ function renderSensorTambahan(data) {
   const gpsMapEl = document.getElementById("sensor-gps-map");
   gpsSatellitesEl.textContent = data.gps_satellites ?? "--";
   if (belumAdaData || !data.gps_fix) {
-    gpsEl.textContent = data.gps_status || "GPS belum dicek";
-    gpsDetailEl.textContent = "Lat: ---.------° / Lon: ---.------°";
-    gpsMapEl.hidden = true;
-    gpsMapEl.removeAttribute("href");
+    const lastValidPoint = data.safety?.last_valid_point;
+    gpsEl.textContent = data.gps_fix ? "FIX AKTIF" : "NO_FIX";
+    if (lastValidPoint && lastValidPoint.length >= 2) {
+      const lat = Number(lastValidPoint[0]);
+      const lon = Number(lastValidPoint[1]);
+      gpsDetailEl.textContent = `Lat terakhir: ${lat.toFixed(6)}° / Lon terakhir: ${lon.toFixed(6)}°`;
+      gpsMapEl.href = `https://www.openstreetmap.org/?mlat=${lat}&mlon=${lon}#map=17/${lat}/${lon}`;
+      gpsMapEl.hidden = false;
+    } else {
+      gpsDetailEl.textContent = "Lat: ---.------° / Lon: ---.------°";
+      gpsMapEl.hidden = true;
+      gpsMapEl.removeAttribute("href");
+    }
   } else {
     const lat = Number(data.gps_lat || 0);
     const lon = Number(data.gps_lon || 0);
@@ -314,6 +359,7 @@ async function perbaruiStatus() {
     document.getElementById("metric-orang").textContent = data.jumlah_orang;
 
     renderEvents(data.events, data.history);
+    renderSafetyWarnings(data);
     renderHistoryTable(data.history);
     renderStartupChecks(data.startup_checks);
     renderSensorTambahan(data);
