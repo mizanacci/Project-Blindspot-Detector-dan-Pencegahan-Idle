@@ -27,6 +27,14 @@ function formatDurasi(detik) {
   return `${String(menit).padStart(2, "0")}:${String(sisaDetik).padStart(2, "0")}`;
 }
 
+function formatDurasiTrip(detik) {
+  const total = Math.max(0, Math.floor(Number(detik) || 0));
+  const jam = Math.floor(total / 3600);
+  const menit = Math.floor((total % 3600) / 60);
+  const detikSisa = total % 60;
+  return `${String(jam).padStart(2, "0")}:${String(menit).padStart(2, "0")}:${String(detikSisa).padStart(2, "0")}`;
+}
+
 function perbaruiJam() {
   const clock = document.getElementById("clock");
   if (clock) clock.textContent = new Date().toLocaleTimeString("id-ID", { hour12: false });
@@ -136,8 +144,13 @@ function renderSensorTambahan(data) {
   const belumAdaData = !data.sensor_last_update;
 
   document.getElementById("sensor-mesin").textContent = belumAdaData ? "\u2014" : (data.status_mesin || "\u2014");
-  document.getElementById("sensor-idle").textContent = belumAdaData ? "\u2014" : (data.status_idle || "\u2014");
-  document.getElementById("sensor-durasi-idle").textContent = belumAdaData ? "--:--" : formatDurasi(data.durasi_idle_s);
+  const idleState = data.safety?.idle_state;
+  const idleLabel = idleState === "IDLE_ACTIVE" ? "IDLE" :
+    (idleState === "IDLE_CANDIDATE" ? "KANDIDAT IDLE" :
+      (idleState === "NORMAL" ? "NORMAL" : (data.status_idle || "\u2014")));
+  document.getElementById("sensor-idle").textContent = belumAdaData ? "\u2014" : idleLabel;
+  const idleDuration = idleState ? data.safety?.idle_duration_s : data.durasi_idle_s;
+  document.getElementById("sensor-durasi-idle").textContent = belumAdaData ? "--:--" : formatDurasi(idleDuration);
   document.getElementById("sensor-getaran").textContent = belumAdaData ? "\u2014 g" : `${Number(data.getaran_g || 0).toFixed(3)} g`;
 
   const tiltX = belumAdaData ? 0 : Number(data.tilt_x_deg || 0);
@@ -201,17 +214,37 @@ function updateSummaryCards(data) {
   document.getElementById("machine-gps-status").textContent = data.gps_fix ? "FIX ACTIVE" : (data.gps_status || "MENUNGGU FIX");
   document.getElementById("machine-stationary-duration").textContent = `${Number(data.safety?.stationary_vibration?.duration_s || 0).toFixed(0)} s`;
   document.getElementById("machine-vibration").textContent = `${Number(data.getaran_g || 0).toFixed(3)} g`;
-  document.getElementById("machine-last-event").textContent = safety.stationary_vibration ? safety.stationary_vibration.reason || "STATIONARY" : "--";
+  const idleEvent = safety.idle_event;
+  const landslideEvent = safety.potential_landslide;
+  document.getElementById("machine-last-event").textContent = landslideEvent?.active
+    ? (landslideEvent.message || "POTENSI LONGSOR TERDETEKSI")
+    : (idleEvent?.active ? (idleEvent.message || "SEGERA MATIKAN MESIN AGAR BAHAN BAKAR LEBIH HEMAT")
+      : (safety.stationary_vibration?.reason || "--"));
 
-  document.getElementById("terrain-risk").textContent = safety.terrain_stability ? (safety.terrain_stability.severity || "WARNING") : "NORMAL";
+  document.getElementById("terrain-risk").textContent = landslideEvent?.active
+    ? "POTENSI LONGSOR"
+    : (safety.terrain_stability ? (safety.terrain_stability.severity || "WARNING") : "NORMAL");
   document.getElementById("terrain-tilt-x").textContent = `${Number(data.tilt_x_deg || 0).toFixed(1)}°`;
   document.getElementById("terrain-tilt-y").textContent = `${Number(data.tilt_y_deg || 0).toFixed(1)}°`;
   document.getElementById("terrain-event-count").textContent = safety.terrain_stability ? "1" : "0";
 
+  document.getElementById("route-state").textContent = trip.active
+    ? "TRIP AKTIF"
+    : (trip.status === "COMPLETED" ? "TRIP SELESAI" : "MENUNGGU TRIP");
+  document.getElementById("route-trip-id").textContent = trip.trip_id || "--";
   document.getElementById("route-start").textContent = trip.start_time || "--";
   document.getElementById("route-end").textContent = trip.end_time || (trip.active ? "ACTIVE" : "--");
+  const gpsCoordinate = (lat, lon) => lat != null && lon != null
+    ? `${Number(lat).toFixed(6)}, ${Number(lon).toFixed(6)}`
+    : "NO FIX";
+  document.getElementById("route-start-gps").textContent = gpsCoordinate(trip.start_lat, trip.start_lon);
+  document.getElementById("route-end-gps").textContent = trip.active
+    ? "MENUNGGU END"
+    : gpsCoordinate(trip.end_lat, trip.end_lon);
+  document.getElementById("route-duration").textContent = formatDurasiTrip(trip.duration_s ?? trip.elapsed_s);
   document.getElementById("route-distance").textContent = `${Number(trip.total_distance_km || 0).toFixed(2)} km`;
   document.getElementById("route-points").textContent = trip.track_points || 0;
+  document.getElementById("route-gps-status").textContent = `${trip.gps_start_status || "--"} / ${trip.gps_end_status || (trip.active ? "ACTIVE" : "--")}`;
 }
 
 function renderMap(data) {

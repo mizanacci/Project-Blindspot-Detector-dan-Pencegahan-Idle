@@ -106,10 +106,16 @@
       <article class="card-panel route-card">
         <div class="card-title">4. MACHINE ROUTE</div>
         <div class="card-body">
+          <div class="stat-row"><span>Trip status</span><strong id="route-state">MENUNGGU TRIP</strong></div>
+          <div class="stat-row"><span>Trip ID</span><strong id="route-trip-id">--</strong></div>
           <div class="stat-row"><span>Start</span><strong id="route-start">--</strong></div>
+          <div class="stat-row"><span>Start GPS</span><strong id="route-start-gps">NO FIX</strong></div>
           <div class="stat-row"><span>End</span><strong id="route-end">--</strong></div>
+          <div class="stat-row"><span>End GPS</span><strong id="route-end-gps">NO FIX</strong></div>
+          <div class="stat-row"><span>Duration</span><strong id="route-duration">00:00:00</strong></div>
           <div class="stat-row"><span>Total distance</span><strong id="route-distance">0.0 km</strong></div>
           <div class="stat-row"><span>Point count</span><strong id="route-points">0</strong></div>
+          <div class="stat-row"><span>GPS start / end</span><strong id="route-gps-status">--</strong></div>
         </div>
       </article>
     </section>
@@ -188,6 +194,8 @@
       <button class="download-btn" data-file="log_stationary_vibration.csv">Download Stationary Vibration Log</button>
       <button class="download-btn" data-file="log_terrain_stability.csv">Download Terrain/Stability Log</button>
       <button class="download-btn" data-file="log_trip.csv">Download Trip Log</button>
+      <button class="download-btn" data-file="log_trip_details.csv">Download Trip Details</button>
+      <button class="download-btn" data-file="log_safety_events.csv">Download Safety Event Log</button>
       <button class="download-btn" data-file="log_sensor_tambahan.csv">Download Sensor Log</button>
     </div>
 

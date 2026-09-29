@@ -22,6 +22,7 @@ import csv
 import os
 import select
 import sys
+import threading
 from datetime import datetime
 
 import cv2
@@ -156,15 +157,111 @@ def log_sensor_reading(row):
         csv.writer(f).writerow(row)
 
 
+class PriorityBuzzer:
+    """Play short event patterns without blocking the safety loop."""
+
+    _PATTERN_PRIORITY = {"double": 1, "three": 2}
+
+    def __init__(self, buzzer, on_time_s=0.12, off_time_s=0.12):
+        self.buzzer = buzzer
+        self.on_time_s = on_time_s
+        self.off_time_s = off_time_s
+        self._lock = threading.Lock()
+        self._wake = threading.Event()
+        self._stop = threading.Event()
+        self._blindspot_active = False
+        self._pending_pattern = None
+        self._current_priority = 0
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def set_blindspot_active(self, active):
+        active = bool(active)
+        with self._lock:
+            if active == self._blindspot_active:
+                return
+            self._blindspot_active = active
+            if active:
+                self._pending_pattern = None
+            self._wake.set()
+
+    def request_pattern(self, pattern):
+        priority = self._PATTERN_PRIORITY.get(pattern)
+        if priority is None:
+            return False
+        with self._lock:
+            if self._blindspot_active or priority <= max(
+                    self._current_priority,
+                    self._PATTERN_PRIORITY.get(self._pending_pattern, 0)):
+                return False
+            self._pending_pattern = pattern
+            self._wake.set()
+        return True
+
+    def _should_interrupt_pattern(self):
+        with self._lock:
+            pending_priority = self._PATTERN_PRIORITY.get(self._pending_pattern, 0)
+            return (self._stop.is_set() or self._blindspot_active or
+                    pending_priority > self._current_priority)
+
+    def _play_pattern(self, pattern):
+        beep_count = 2 if pattern == "double" else 3
+        for index in range(beep_count):
+            if self._should_interrupt_pattern():
+                return
+            self.buzzer.on()
+            time.sleep(self.on_time_s)
+            self.buzzer.off()
+            if index < beep_count - 1:
+                time.sleep(self.off_time_s)
+
+    def _run(self):
+        try:
+            while not self._stop.is_set():
+                self._wake.wait()
+                self._wake.clear()
+                while not self._stop.is_set():
+                    with self._lock:
+                        blindspot_active = self._blindspot_active
+                        pattern = self._pending_pattern
+                        if pattern is not None and not blindspot_active:
+                            self._pending_pattern = None
+                            self._current_priority = self._PATTERN_PRIORITY[pattern]
+
+                    if blindspot_active:
+                        self.buzzer.on()
+                        break
+                    if pattern is None:
+                        self.buzzer.off()
+                        break
+
+                    self._play_pattern(pattern)
+                    with self._lock:
+                        self._current_priority = 0
+        finally:
+            self.buzzer.off()
+
+    def close(self):
+        self._stop.set()
+        self._wake.set()
+        self._thread.join(timeout=1.0)
+        self.buzzer.close()
+
+
 def set_output(status, buzzer, led_hijau, led_kuning, led_merah):
-    led_hijau.off(); led_kuning.off(); led_merah.off(); buzzer.off()
+    led_hijau.off(); led_kuning.off(); led_merah.off()
+    if hasattr(buzzer, "set_blindspot_active"):
+        buzzer.set_blindspot_active(status == 'bahaya')
+    else:
+        buzzer.off()
     if status == 'aman':
         led_hijau.on()
     elif status == 'siaga':
         led_kuning.on()
     else:
         led_merah.on()
-        buzzer.on()
+        if not hasattr(buzzer, "set_blindspot_active"):
+            buzzer.on()
 
 
 def urgensi_paling_parah(tracks_aktif, cfg):
@@ -187,27 +284,47 @@ def urgensi_paling_parah(tracks_aktif, cfg):
     return terparah[1], terparah[2], terparah[0], terparah[3]
 
 
-def update_trip_tracking(engine, gps_lokasi):
-    """Kelola trip berdasarkan valid GPS fix tanpa memblokir blind-spot loop."""
+def update_trip_tracking(engine, gps_lokasi, machine_state="TIDAK_PASTI", timestamp=None):
+    """Update one operation trip, keeping it open across temporary GPS loss."""
     if engine is None:
         return {"trip_active": False, "status": "UNAVAILABLE", "distance_km": 0.0}
 
+    timestamp = timestamp or datetime.now().isoformat(timespec='seconds')
     fix = int(gps_lokasi.get('fix', 0) or 0)
     lat = gps_lokasi.get('lat')
     lon = gps_lokasi.get('lon')
-    if fix == 1 and lat is not None and lon is not None and abs(float(lat)) > 0.0 and abs(float(lon)) > 0.0:
-        if not engine.trip.active:
-            engine.start_trip(float(lat), float(lon))
-            engine.record_trip_point(float(lat), float(lon))
-            return {"trip_active": True, "status": "STARTED", "distance_km": engine.trip.total_distance_km}
-        engine.record_trip_point(float(lat), float(lon))
-        return {"trip_active": True, "status": "ACTIVE", "distance_km": engine.trip.total_distance_km}
+    point = engine.trip.valid_gps_point(fix == 1, lat, lon)
+    gps_status = "GPS_VALID" if point is not None else "NO_FIX"
+    status = "WAITING_FOR_OPERATION"
 
-    if engine.trip.active:
-        engine.end_trip(float(lat) if lat is not None else None, float(lon) if lon is not None else None)
-        return {"trip_active": False, "status": "COMPLETED", "distance_km": engine.trip.total_distance_km}
+    if engine.trip.active and machine_state == "MATI":
+        engine.end_trip(
+            point[0] if point is not None else None,
+            point[1] if point is not None else None,
+            timestamp=timestamp,
+            gps_status=gps_status,
+        )
+        status = "COMPLETED"
+    elif engine.trip.active:
+        if point is not None:
+            engine.record_trip_point(*point, timestamp=timestamp, gps_status=gps_status)
+        status = "ACTIVE"
+    elif machine_state == "ON" and point is not None:
+        engine.start_trip(*point, timestamp=timestamp, gps_status=gps_status)
+        status = "STARTED"
+    elif point is None:
+        status = "WAITING_FIX"
 
-    return {"trip_active": False, "status": "WAITING_FIX", "distance_km": 0.0}
+    trip = engine.trip.snapshot()
+    trip["status"] = status
+    return {
+        "trip_active": trip["active"],
+        "status": status,
+        "distance_km": trip["total_distance_km"],
+        "trip_id": trip["trip_id"],
+        "trip": trip,
+        "summary": engine.trip.summary_text() if status == "COMPLETED" else None,
+    }
 
 
 def wait_for_operator_start():
@@ -344,7 +461,7 @@ def main():
         print("Kamera tidak terdeteksi. Cek koneksi webcam.")
         return
 
-    buzzer = Buzzer(BUZZER_PIN)
+    buzzer = PriorityBuzzer(Buzzer(BUZZER_PIN))
     led_hijau = LED(LED_HIJAU_PIN)
     led_kuning = LED(LED_KUNING_PIN)
     led_merah = LED(LED_MERAH_PIN)
@@ -437,25 +554,34 @@ def main():
                 gps_lokasi['last_sentence_time']
             )
 
-            trip_state = update_trip_tracking(safety_engine, gps_lokasi)
+            cycle_timestamp = datetime.now().isoformat(timespec='seconds')
+            trip_state = update_trip_tracking(
+                safety_engine, gps_lokasi, sensor_mpu['status_mesin'], cycle_timestamp
+            )
             if safety_engine is not None:
                 safety_result = safety_engine.update(
                     gps_lokasi['fix'], gps_lokasi['lat'], gps_lokasi['lon'], gps_lokasi['status'],
                     sensor_mpu['getaran_g'], sensor_mpu['getaran_g'], int(sw420_terdeteksi),
                     sensor_mpu['status_mesin'], sensor_mpu['tilt_x_deg'], sensor_mpu['tilt_y_deg'],
-                    datetime.now().isoformat(timespec='seconds')
+                    cycle_timestamp,
+                    tilt_valid=sensor_mpu['tilt_status'] in ('NORMAL', 'MIRING'),
+                    trip_id=trip_state.get('trip_id'),
                 )
                 if trip_state:
-                    safety_result['trip'] = {
-                        'active': trip_state['trip_active'],
-                        'status': trip_state['status'],
-                        'total_distance_km': trip_state.get('distance_km', safety_result.get('trip', {}).get('total_distance_km', 0.0)),
-                    }
+                    safety_result['trip'] = trip_state['trip']
                 state.update_safety_overview(safety_result)
+                if safety_result.get('buzzer_pattern'):
+                    buzzer.request_pattern(safety_result['buzzer_pattern'])
+                if safety_result.get('new_landslide_event'):
+                    print("POTENSI LONGSOR TERDETEKSI")
+                elif safety_result.get('new_idle_event'):
+                    print("SEGERA MATIKAN MESIN AGAR BAHAN BAKAR LEBIH HEMAT")
                 state.append_sensor_analytics(
                     sensor_mpu['getaran_g'], sensor_mpu['tilt_x_deg'], sensor_mpu['tilt_y_deg'],
                     gps_lokasi['lat'], gps_lokasi['lon']
                 )
+            if trip_state.get('status') == "COMPLETED":
+                print(trip_state["summary"])
 
             timestamp = datetime.now().isoformat(timespec='seconds')
             print(f"[{timestamp}] orang={len(tracks_aktif)}  jarak_terdekat={jarak_m:5.1f}m  "
@@ -492,9 +618,24 @@ def main():
     except KeyboardInterrupt:
         print("\nDihentikan oleh pengguna.")
     finally:
+        if safety_engine is not None and safety_engine.trip.active:
+            final_gps = {"fix": 0, "lat": None, "lon": None}
+            if gps is not None:
+                try:
+                    final_gps = gps.baca_lokasi(maks_baris=GPS_MAX_LINES)
+                except Exception as exc:
+                    print(f"GPS final tidak dapat dibaca: {exc}")
+            final_trip = update_trip_tracking(
+                safety_engine,
+                final_gps,
+                machine_state="MATI",
+                timestamp=datetime.now().isoformat(timespec='seconds'),
+            )
+            if final_trip.get("summary"):
+                print(final_trip["summary"])
         if can_use_gui():
             cv2.destroyAllWindows()
-        buzzer.off(); led_hijau.off(); led_kuning.off(); led_merah.off()
+        buzzer.close(); led_hijau.off(); led_kuning.off(); led_merah.off()
         if mpu6050 is not None:
             mpu6050.close()
         if sw420 is not None:

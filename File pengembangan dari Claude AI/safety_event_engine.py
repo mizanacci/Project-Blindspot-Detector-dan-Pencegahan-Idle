@@ -2,6 +2,7 @@ import csv
 import json
 import math
 import os
+import tempfile
 import time
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -16,6 +17,11 @@ DEFAULT_CONFIG = {
     "VIBRATION_CRITICAL_RMS": 0.25,
     "TILT_DURATION_S": 8.0,
     "VIBRATION_DURATION_S": 8.0,
+    "IDLE_DURATION_THRESHOLD_S": 5.0,
+    "IDLE_DISTANCE_THRESHOLD_M": 2.0,
+    "IDLE_LOG_UPDATE_INTERVAL_S": 30.0,
+    "HEAVY_VIBRATION_THRESHOLD": 0.25,
+    "TILT_THRESHOLD_DEG": 18.0,
 }
 
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "safety_config.json")
@@ -34,8 +40,19 @@ def load_runtime_config(path=CONFIG_PATH):
 
 
 class TripTracker:
-    def __init__(self, base_dir="."):
+    DETAIL_LOG = "log_trip_details.csv"
+    DETAIL_FIELDS = [
+        "record_type", "trip_id", "timestamp", "start_timestamp",
+        "start_latitude", "start_longitude", "end_timestamp", "end_latitude",
+        "end_longitude", "duration_s", "duration_min", "total_distance_km",
+        "track_points", "gps_start_status", "gps_end_status", "latitude",
+        "longitude", "distance_from_previous_m", "cumulative_distance_km",
+        "gps_status",
+    ]
+
+    def __init__(self, base_dir=".", min_distance_m=2.0):
         self.base_dir = base_dir
+        self.min_distance_m = max(0.0, float(min_distance_m))
         self.active = False
         self.start_time = None
         self.end_time = None
@@ -47,70 +64,163 @@ class TripTracker:
         self.total_distance_km = 0.0
         self.trip_id = None
         self._last_point = None
+        self._gps_start_status = None
+        self._gps_end_status = None
+        self._duration_s = 0.0
         self._ensure_log()
 
     def _ensure_log(self):
         os.makedirs(self.base_dir, exist_ok=True)
         path = os.path.join(self.base_dir, "log_trip.csv")
-        if os.path.exists(path):
-            return
-        with open(path, "w", newline="") as handle:
-            writer = csv.writer(handle)
-            writer.writerow([
-                "timestamp", "trip_id", "event_type", "latitude", "longitude",
-                "distance_km", "elapsed_s", "status"
-            ])
+        if not os.path.exists(path):
+            with open(path, "w", newline="") as handle:
+                writer = csv.writer(handle)
+                writer.writerow([
+                    "timestamp", "trip_id", "event_type", "latitude", "longitude",
+                    "distance_km", "elapsed_s", "status"
+                ])
+        detail_path = os.path.join(self.base_dir, self.DETAIL_LOG)
+        if not os.path.exists(detail_path):
+            with open(detail_path, "w", newline="") as handle:
+                csv.DictWriter(handle, fieldnames=self.DETAIL_FIELDS).writeheader()
 
-    def start_trip(self, lat=None, lon=None):
-        now = datetime.now().isoformat(timespec="seconds")
+    @staticmethod
+    def valid_gps_point(fix, lat, lon):
+        if not fix:
+            return None
+        try:
+            latitude = float(lat)
+            longitude = float(lon)
+        except (TypeError, ValueError):
+            return None
+        if (not math.isfinite(latitude) or not math.isfinite(longitude) or
+                not -90.0 <= latitude <= 90.0 or not -180.0 <= longitude <= 180.0):
+            return None
+        return latitude, longitude
+
+    @staticmethod
+    def _elapsed_seconds(start_timestamp, end_timestamp):
+        try:
+            start = datetime.fromisoformat(start_timestamp)
+            end = datetime.fromisoformat(end_timestamp)
+            if start.tzinfo is None and end.tzinfo is not None:
+                start = start.replace(tzinfo=end.tzinfo)
+            elif start.tzinfo is not None and end.tzinfo is None:
+                end = end.replace(tzinfo=start.tzinfo)
+            return max(0.0, (end - start).total_seconds())
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _append_detail(self, row):
+        path = os.path.join(self.base_dir, self.DETAIL_LOG)
+        with open(path, "a", newline="") as handle:
+            csv.DictWriter(handle, fieldnames=self.DETAIL_FIELDS).writerow(row)
+
+    def _append_track_point(self, point, timestamp, distance_m, gps_status):
+        cumulative_km = round(self.total_distance_km, 6)
+        track_point = {
+            "timestamp": timestamp,
+            "lat": point[0],
+            "lon": point[1],
+            "distance_from_previous_m": round(distance_m, 2),
+            "distance_km": cumulative_km,
+            "gps_status": gps_status,
+        }
+        self.track_points.append(track_point)
+        self._append_detail({
+            "record_type": "TRACK_POINT",
+            "trip_id": self.trip_id,
+            "timestamp": timestamp,
+            "latitude": point[0],
+            "longitude": point[1],
+            "distance_from_previous_m": round(distance_m, 2),
+            "cumulative_distance_km": cumulative_km,
+            "gps_status": gps_status,
+        })
+
+    def start_trip(self, lat=None, lon=None, timestamp=None, gps_status="GPS_VALID"):
+        if self.active:
+            return self.snapshot()
+        point = self.valid_gps_point(gps_status == "GPS_VALID", lat, lon)
+        if point is None:
+            return None
+
+        now = timestamp or datetime.now().astimezone().isoformat(timespec="seconds")
         self.active = True
         self.start_time = now
         self.end_time = None
-        self.start_lat = lat
-        self.start_lon = lon
+        self.start_lat, self.start_lon = point
         self.end_lat = None
         self.end_lon = None
         self.trip_id = f"trip-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:6]}"
         self.track_points = []
         self.total_distance_km = 0.0
-        self._last_point = (lat, lon) if lat is not None and lon is not None else None
-        self._append_log(now, "START", lat, lon, 0.0, 0, "ACTIVE")
+        self._duration_s = 0.0
+        self._gps_start_status = gps_status
+        self._gps_end_status = None
+        self._last_point = point
+        self._append_log(now, "START", point[0], point[1], 0.0, 0, "ACTIVE")
+        self._append_track_point(point, now, 0.0, gps_status)
+        return self.snapshot()
 
-    def update_position(self, lat, lon, now=None):
+    def update_position(self, lat, lon, now=None, gps_status="GPS_VALID"):
         if not self.active:
-            return
-        if lat is None or lon is None:
-            return
+            return False
+        point = self.valid_gps_point(gps_status == "GPS_VALID", lat, lon)
+        if point is None:
+            return False
+        timestamp = now or datetime.now().astimezone().isoformat(timespec="seconds")
         if self._last_point is not None:
-            distance_km = self._haversine_km(self._last_point, (lat, lon))
-            self.total_distance_km += distance_km
+            distance_m = self._haversine_m(self._last_point, point)
+            if distance_m < self.min_distance_m:
+                return False
         else:
-            distance_km = 0.0
-        self._last_point = (lat, lon)
-        self.track_points.append({
-            "timestamp": now or datetime.now().isoformat(timespec="seconds"),
-            "lat": lat,
-            "lon": lon,
-            "distance_km": round(self.total_distance_km, 4),
-        })
+            distance_m = 0.0
+        self.total_distance_km += distance_m / 1000.0
+        self._last_point = point
+        self._append_track_point(point, timestamp, distance_m, gps_status)
+        return True
 
-    def end_trip(self, lat=None, lon=None):
+    def end_trip(self, lat=None, lon=None, timestamp=None, gps_status=None):
         if not self.active:
-            return
-        now = datetime.now().isoformat(timespec="seconds")
+            return self.snapshot()
+        now = timestamp or datetime.now().astimezone().isoformat(timespec="seconds")
+        end_status = gps_status or ("GPS_VALID" if lat is not None and lon is not None else "NO_FIX")
+        point = self.valid_gps_point(end_status == "GPS_VALID", lat, lon)
+        if point is None:
+            end_status = "NO_FIX"
+        else:
+            self.update_position(point[0], point[1], now=now, gps_status="GPS_VALID")
+
         self.end_time = now
-        self.end_lat = lat
-        self.end_lon = lon
+        self.end_lat = point[0] if point is not None else None
+        self.end_lon = point[1] if point is not None else None
+        self._gps_end_status = end_status
         self.active = False
-        elapsed_s = 0
-        if self.start_time:
-            try:
-                start_dt = datetime.fromisoformat(self.start_time)
-                end_dt = datetime.fromisoformat(now)
-                elapsed_s = int((end_dt - start_dt).total_seconds())
-            except Exception:
-                elapsed_s = 0
-        self._append_log(now, "END", lat, lon, round(self.total_distance_km, 4), elapsed_s, "COMPLETED")
+        self._duration_s = self._elapsed_seconds(self.start_time, self.end_time)
+        elapsed_s = round(self._duration_s, 1)
+        self._append_log(
+            now, "END", self.end_lat, self.end_lon,
+            round(self.total_distance_km, 4), elapsed_s, "COMPLETED",
+        )
+        self._append_detail({
+            "record_type": "TRIP_SUMMARY",
+            "trip_id": self.trip_id,
+            "timestamp": now,
+            "start_timestamp": self.start_time,
+            "start_latitude": self.start_lat,
+            "start_longitude": self.start_lon,
+            "end_timestamp": self.end_time,
+            "end_latitude": self.end_lat,
+            "end_longitude": self.end_lon,
+            "duration_s": round(self._duration_s, 1),
+            "duration_min": round(self._duration_s / 60.0, 2),
+            "total_distance_km": round(self.total_distance_km, 6),
+            "track_points": len(self.track_points),
+            "gps_start_status": self._gps_start_status,
+            "gps_end_status": self._gps_end_status,
+        })
+        return self.snapshot()
 
     def _append_log(self, timestamp, event_type, lat, lon, distance_km, elapsed_s, status):
         path = os.path.join(self.base_dir, "log_trip.csv")
@@ -138,42 +248,88 @@ class TripTracker:
         a = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
         return 2 * 6371.0 * math.asin(math.sqrt(a))
 
-    def snapshot(self):
-        elapsed_s = 0
+    @staticmethod
+    def _haversine_m(point_a, point_b):
+        return TripTracker._haversine_km(point_a, point_b) * 1000.0
+
+    def snapshot(self, now=None):
+        elapsed_s = self._duration_s
         if self.start_time and self.active:
-            try:
-                elapsed_s = int((datetime.now() - datetime.fromisoformat(self.start_time)).total_seconds())
-            except Exception:
-                elapsed_s = 0
+            current_time = now or datetime.now().astimezone().isoformat(timespec="seconds")
+            elapsed_s = self._elapsed_seconds(self.start_time, current_time)
         return {
             "active": self.active,
+            "status": "ACTIVE" if self.active else ("COMPLETED" if self.end_time else "WAITING_FIX"),
+            "trip_id": self.trip_id,
             "start_time": self.start_time,
             "end_time": self.end_time,
             "start_lat": self.start_lat,
             "start_lon": self.start_lon,
             "end_lat": self.end_lat,
             "end_lon": self.end_lon,
-            "total_distance_km": round(self.total_distance_km, 4),
-            "elapsed_s": elapsed_s,
+            "gps_start_status": self._gps_start_status,
+            "gps_end_status": self._gps_end_status,
+            "total_distance_km": round(self.total_distance_km, 6),
+            "duration_s": round(elapsed_s, 1),
+            "duration_min": round(elapsed_s / 60.0, 2),
+            "elapsed_s": round(elapsed_s, 1),
             "track_points": len(self.track_points),
-            "trip_id": self.trip_id,
         }
+
+    def summary_text(self):
+        summary = self.snapshot()
+        start_gps = (f"{self.start_lat:.6f}, {self.start_lon:.6f}"
+                     if self.start_lat is not None and self.start_lon is not None else "NO_FIX")
+        end_gps = (f"{self.end_lat:.6f}, {self.end_lon:.6f}"
+                   if self.end_lat is not None and self.end_lon is not None else "NO_FIX")
+        duration = int(summary["duration_s"])
+        hours, remainder = divmod(duration, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        return (
+            "=== TRIP SUMMARY ===\n"
+            f"Trip ID : {self.trip_id}\n"
+            f"Start Time : {self.start_time}\n"
+            f"Start GPS : {start_gps}\n"
+            f"End Time : {self.end_time}\n"
+            f"End GPS : {end_gps}\n"
+            f"Duration : {hours:02d}:{minutes:02d}:{seconds:02d}\n"
+            f"Total Distance: {summary['total_distance_km']:.4f} km\n"
+            f"Track Points : {summary['track_points']}\n"
+            f"GPS Status : {self._gps_start_status} -> {self._gps_end_status}\n"
+            "===================="
+        )
 
 
 class SafetyEventEngine:
-    def __init__(self, base_dir=".", config=None):
+    SAFETY_EVENT_FIELDS = [
+        "timestamp", "event_id", "trip_id", "event_type", "event_action",
+        "timestamp_start", "timestamp_end", "duration_s",
+        "latitude", "longitude", "end_latitude", "end_longitude",
+        "gps_status", "vibration_g", "vibration_threshold_g",
+        "tilt_deg", "tilt_threshold_deg", "tilt_x_deg", "tilt_y_deg",
+        "tilt_reference_valid", "sw420_detected", "machine_state", "message",
+    ]
+
+    def __init__(self, base_dir=".", config=None, clock=None):
         self.base_dir = base_dir
         self.config = load_runtime_config()
         if config:
             self.config.update(config)
-        self.trip = TripTracker(base_dir=base_dir)
-        self._stationary_event = None
-        self._terrain_event = None
+        self._clock = clock or time.monotonic
+        self.trip = TripTracker(
+            base_dir=base_dir,
+            min_distance_m=self.config["IDLE_DISTANCE_THRESHOLD_M"],
+        )
         self._gps_last_valid = None
-        self._stationary_started = None
-        self._stationary_vibration_count = 0
-        self._terrain_started = None
-        self._terrain_count = 0
+        self._idle_state = "NORMAL"
+        self._idle_started_monotonic = None
+        self._idle_started_at = None
+        self._idle_reference_point = None
+        self._idle_event = None
+        self._idle_last_event = None
+        self._idle_last_log_monotonic = None
+        self._landslide_latched = False
+        self._landslide_event = None
         self._ensure_logs()
 
     def _ensure_logs(self):
@@ -183,9 +339,12 @@ class SafetyEventEngine:
             "log_terrain_stability.csv",
             "log_blindspot.csv",
             "log_sensor_tambahan.csv",
+            "log_safety_events.csv",
         ]:
             path = os.path.join(self.base_dir, name)
             if os.path.exists(path):
+                if name == "log_safety_events.csv":
+                    self._ensure_safety_event_schema(path)
                 continue
             with open(path, "w", newline="") as handle:
                 writer = csv.writer(handle)
@@ -206,10 +365,34 @@ class SafetyEventEngine:
                         "timestamp", "event_id", "event_type", "severity", "person_count",
                         "nearest_distance_m", "duration_s", "status"
                     ])
+                elif name == "log_safety_events.csv":
+                    writer.writerow(self.SAFETY_EVENT_FIELDS)
                 else:
                     writer.writerow([
                         "timestamp", "event_id", "event_type", "severity", "status"
                     ])
+
+    def _ensure_safety_event_schema(self, path):
+        temporary_path = None
+        try:
+            with open(path, newline="") as source:
+                reader = csv.DictReader(source)
+                existing_fields = reader.fieldnames or []
+                if existing_fields == self.SAFETY_EVENT_FIELDS:
+                    return
+                fields = list(self.SAFETY_EVENT_FIELDS)
+                fields.extend(field for field in existing_fields if field not in fields)
+                with tempfile.NamedTemporaryFile(
+                        "w", newline="", dir=self.base_dir, delete=False) as target:
+                    temporary_path = target.name
+                    writer = csv.DictWriter(target, fieldnames=fields)
+                    writer.writeheader()
+                    for row in reader:
+                        writer.writerow(row)
+            os.replace(temporary_path, path)
+        finally:
+            if temporary_path is not None and os.path.exists(temporary_path):
+                os.unlink(temporary_path)
 
     def _event_id(self, prefix="evt"):
         return f"{prefix}-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:6]}"
@@ -229,134 +412,241 @@ class SafetyEventEngine:
         with open(path, "a", newline="") as handle:
             csv.writer(handle).writerow(row)
 
-    def check_stationary_vibration(self, fix, lat, lon, gps_status, vibration_rms, vibration_peak, sw420_event_count, machine_state, timestamp=None):
-        if fix != 1 or lat in (None, 0.0) or lon in (None, 0.0):
-            self._stationary_started = None
+    @staticmethod
+    def _valid_gps_point(fix, latitude, longitude):
+        try:
+            latitude = float(latitude)
+            longitude = float(longitude)
+        except (TypeError, ValueError):
             return None
-        point = (lat, lon)
-        if self._gps_last_valid is None:
-            self._gps_last_valid = point
-        movement_m = self._haversine_m(self._gps_last_valid, point)
-        if movement_m <= self.config["STATIONARY_RADIUS_M"]:
-            if self._stationary_started is None:
-                self._stationary_started = time.time()
-            duration_s = time.time() - self._stationary_started
-            if vibration_rms >= self.config["VIBRATION_WARNING_RMS"] and duration_s >= self.config["STATIONARY_DURATION_S"]:
-                event = {
-                    "event_id": self._event_id("stationary"),
-                    "timestamp": timestamp or datetime.now().isoformat(timespec="seconds"),
-                    "duration_s": round(duration_s, 1),
-                    "latitude": lat,
-                    "longitude": lon,
-                    "gps_status": gps_status,
-                    "vibration_rms": round(float(vibration_rms), 4),
-                    "vibration_peak": round(float(vibration_peak), 4),
-                    "sw420_event_count": int(sw420_event_count),
-                    "machine_state": machine_state,
-                    "severity": "WARNING" if vibration_rms < self.config["VIBRATION_CRITICAL_RMS"] else "HIGH RISK",
-                    "reason": "stationary with vibration over threshold",
-                }
-                self._stationary_event = event
-                self._write_csv(
-                    "log_stationary_vibration.csv",
-                    [
-                        event["timestamp"], event["event_id"], "STATIONARY VIBRATION", event["duration_s"],
-                        event["latitude"], event["longitude"], event["gps_status"], event["vibration_rms"],
-                        event["vibration_peak"], event["sw420_event_count"], event["machine_state"], event["severity"], event["reason"]
-                    ]
-                )
-                return event
-        else:
-            self._stationary_started = None
-            self._gps_last_valid = point
-        self._gps_last_valid = point
-        return None
+        if (not fix or not math.isfinite(latitude) or not math.isfinite(longitude) or
+                not -90.0 <= latitude <= 90.0 or not -180.0 <= longitude <= 180.0):
+            return None
+        return latitude, longitude
 
-    def check_terrain_stability(self, fix, lat, lon, gps_status, tilt_x, tilt_y, vibration_rms, vibration_peak, sw420_event_count, machine_state, timestamp=None):
-        if fix != 1 or lat in (None, 0.0) or lon in (None, 0.0):
-            self._terrain_started = None
-            return None
-        tilt_abs = max(abs(float(tilt_x)), abs(float(tilt_y)))
-        vibration = float(vibration_rms)
-        sw420_count = int(sw420_event_count)
-        threshold_reason = []
-        if tilt_abs >= self.config["TILT_WARNING_DEG"]:
-            threshold_reason.append("tilt")
-        if vibration >= self.config["VIBRATION_WARNING_RMS"]:
-            threshold_reason.append("vibration")
-        if sw420_count > 0:
-            threshold_reason.append("sw420")
-        if not threshold_reason:
-            self._terrain_started = None
-            return None
-        if self._terrain_started is None:
-            self._terrain_started = time.time()
-        duration_s = time.time() - self._terrain_started
-        if duration_s < self.config["TILT_DURATION_S"] and duration_s < self.config["VIBRATION_DURATION_S"]:
-            return None
-        severity = "WARNING"
-        if tilt_abs >= self.config["TILT_CRITICAL_DEG"] or vibration >= self.config["VIBRATION_CRITICAL_RMS"] or sw420_count >= 2:
-            severity = "HIGH RISK"
-        event = {
-            "event_id": self._event_id("terrain"),
-            "timestamp": timestamp or datetime.now().isoformat(timespec="seconds"),
-            "duration_s": round(duration_s, 1),
-            "latitude": lat,
-            "longitude": lon,
-            "gps_status": gps_status,
-            "tilt_x": round(float(tilt_x), 2),
-            "tilt_y": round(float(tilt_y), 2),
-            "vibration_rms": round(vibration, 4),
-            "vibration_peak": round(float(vibration_peak), 4),
-            "sw420_event_count": sw420_count,
-            "machine_state": machine_state,
-            "severity": severity,
-            "trigger_reason": ", ".join(threshold_reason),
-        }
-        self._terrain_event = event
-        self._write_csv(
-            "log_terrain_stability.csv",
-            [
-                event["timestamp"], event["event_id"], "TERRAIN STABILITY", event["duration_s"],
-                event["latitude"], event["longitude"], event["tilt_x"], event["tilt_y"],
-                event["vibration_rms"], event["vibration_peak"], event["sw420_event_count"],
-                event["machine_state"], event["severity"], event["trigger_reason"]
-            ]
-        )
-        return event
+    def _write_safety_event(self, event, action, timestamp, end_point=None,
+                            gps_status=None, duration_s=None):
+        self._write_csv("log_safety_events.csv", [
+            timestamp,
+            event["event_id"],
+            event.get("trip_id"),
+            event["event_type"],
+            action,
+            event.get("timestamp_start"),
+            event.get("timestamp_end"),
+            round(duration_s if duration_s is not None else event.get("duration_s", 0.0), 1),
+            event.get("latitude"),
+            event.get("longitude"),
+            end_point[0] if end_point is not None else None,
+            end_point[1] if end_point is not None else None,
+            gps_status or event.get("gps_status"),
+            event.get("vibration_g"),
+            event.get("vibration_threshold_g"),
+            event.get("tilt_deg"),
+            event.get("tilt_threshold_deg"),
+            event.get("tilt_x_deg"),
+            event.get("tilt_y_deg"),
+            event.get("tilt_reference_valid"),
+            event.get("sw420_detected"),
+            event.get("machine_state"),
+            event.get("message"),
+        ])
 
-    def update(self, gps_fix, gps_lat, gps_lon, gps_status, vibration_rms, vibration_peak, sw420_event_count, machine_state, tilt_x, tilt_y, timestamp=None):
-        stationary = self.check_stationary_vibration(
-            gps_fix, gps_lat, gps_lon, gps_status,
-            float(vibration_rms or 0.0), float(vibration_peak or 0.0),
-            sw420_event_count, machine_state, timestamp=timestamp
+    def _reset_idle_candidate(self):
+        self._idle_state = "NORMAL"
+        self._idle_started_monotonic = None
+        self._idle_started_at = None
+        self._idle_reference_point = None
+        self._idle_event = None
+        self._idle_last_log_monotonic = None
+
+    def _close_idle_session(self, now_monotonic, timestamp, end_point):
+        if self._idle_state == "IDLE_ACTIVE" and self._idle_event is not None:
+            duration_s = max(0.0, now_monotonic - self._idle_started_monotonic)
+            self._idle_event.update({
+                "active": False,
+                "timestamp_end": timestamp,
+                "duration_s": round(duration_s, 1),
+                "end_latitude": end_point[0] if end_point is not None else None,
+                "end_longitude": end_point[1] if end_point is not None else None,
+                "gps_status": "GPS_VALID" if end_point is not None else "NO_FIX",
+            })
+            self._write_safety_event(
+                self._idle_event, "END", timestamp, end_point=end_point,
+                gps_status=self._idle_event["gps_status"], duration_s=duration_s,
+            )
+            self._idle_last_event = dict(self._idle_event)
+        self._reset_idle_candidate()
+
+    def _update_idle(self, now_monotonic, timestamp, point, sw420_active,
+                     vibration_g, machine_state, trip_id):
+        new_idle_event = False
+        if self._idle_state == "NORMAL":
+            if sw420_active and point is not None:
+                self._idle_state = "IDLE_CANDIDATE"
+                self._idle_started_monotonic = now_monotonic
+                self._idle_started_at = timestamp
+                self._idle_reference_point = point
+            else:
+                return False
+
+        distance_m = self._haversine_m(self._idle_reference_point, point) if point is not None else float("inf")
+        still_vibrating = sw420_active
+        still_stationary = point is not None and distance_m <= self.config["IDLE_DISTANCE_THRESHOLD_M"]
+        if not still_vibrating or not still_stationary:
+            self._close_idle_session(now_monotonic, timestamp, point)
+            return False
+
+        duration_s = max(0.0, now_monotonic - self._idle_started_monotonic)
+        if self._idle_state == "IDLE_CANDIDATE" and duration_s >= self.config["IDLE_DURATION_THRESHOLD_S"]:
+            self._idle_state = "IDLE_ACTIVE"
+            self._idle_event = {
+                "event_id": self._event_id("idle"),
+                "trip_id": trip_id,
+                "event_type": "IDLE",
+                "active": True,
+                "timestamp_start": self._idle_started_at,
+                "timestamp_detected": timestamp,
+                "duration_s": round(duration_s, 1),
+                "latitude": self._idle_reference_point[0],
+                "longitude": self._idle_reference_point[1],
+                "gps_status": "GPS_VALID",
+                "vibration_g": round(float(vibration_g), 4),
+                "sw420_detected": True,
+                "machine_state": machine_state,
+                "message": "SEGERA MATIKAN MESIN AGAR BAHAN BAKAR LEBIH HEMAT",
+            }
+            self._idle_last_log_monotonic = now_monotonic
+            self._write_safety_event(self._idle_event, "START", timestamp, duration_s=duration_s)
+            self._idle_last_event = dict(self._idle_event)
+            new_idle_event = True
+        elif self._idle_state == "IDLE_ACTIVE":
+            self._idle_event["duration_s"] = round(duration_s, 1)
+            self._idle_event["vibration_g"] = round(float(vibration_g), 4)
+            self._idle_event["machine_state"] = machine_state
+            self._idle_last_event = dict(self._idle_event)
+            if (now_monotonic - self._idle_last_log_monotonic >=
+                    self.config["IDLE_LOG_UPDATE_INTERVAL_S"]):
+                self._write_safety_event(self._idle_event, "UPDATE", timestamp, duration_s=duration_s)
+                self._idle_last_log_monotonic = now_monotonic
+        return new_idle_event
+
+    def _update_landslide(self, timestamp, point, vibration_g, tilt_x, tilt_y,
+                          tilt_valid, sw420_active, machine_state, trip_id):
+        vibration_threshold = float(self.config["HEAVY_VIBRATION_THRESHOLD"])
+        tilt_threshold = float(self.config["TILT_THRESHOLD_DEG"])
+        tilt_deg = max(abs(float(tilt_x)), abs(float(tilt_y)))
+        heavy_vibration = float(vibration_g) > vibration_threshold
+        excessive_tilt = bool(tilt_valid) and tilt_deg > tilt_threshold
+        condition = heavy_vibration and excessive_tilt
+        new_event = False
+
+        if condition and not self._landslide_latched:
+            self._landslide_latched = True
+            self._landslide_event = {
+                "event_id": self._event_id("landslide"),
+                "trip_id": trip_id,
+                "event_type": "POTENSI_LONGSOR",
+                "active": True,
+                "timestamp": timestamp,
+                "latitude": point[0] if point is not None else None,
+                "longitude": point[1] if point is not None else None,
+                "gps_status": "GPS_VALID" if point is not None else "NO_FIX",
+                "vibration_g": round(float(vibration_g), 4),
+                "vibration_threshold_g": vibration_threshold,
+                "tilt_deg": round(tilt_deg, 2),
+                "tilt_threshold_deg": tilt_threshold,
+                "tilt_x_deg": round(float(tilt_x), 2),
+                "tilt_y_deg": round(float(tilt_y), 2),
+                "tilt_reference_valid": bool(tilt_valid),
+                "sw420_detected": bool(sw420_active),
+                "machine_state": machine_state,
+                "message": "POTENSI LONGSOR TERDETEKSI",
+            }
+            self._write_safety_event(self._landslide_event, "DETECTED", timestamp)
+            new_event = True
+        elif (tilt_valid and not heavy_vibration and not excessive_tilt and
+              self._landslide_latched):
+            self._landslide_latched = False
+            self._landslide_event["active"] = False
+            self._landslide_event["timestamp_end"] = timestamp
+            self._write_safety_event(self._landslide_event, "CLEARED", timestamp)
+
+        return condition, new_event
+
+    def update(self, gps_fix, gps_lat, gps_lon, gps_status, vibration_rms, vibration_peak, sw420_event_count, machine_state, tilt_x, tilt_y, timestamp=None, now_monotonic=None, tilt_valid=True, trip_id=None):
+        now_monotonic = self._clock() if now_monotonic is None else float(now_monotonic)
+        timestamp = timestamp or datetime.now().isoformat(timespec="seconds")
+        point = self._valid_gps_point(gps_fix, gps_lat, gps_lon)
+        if point is not None:
+            self._gps_last_valid = point
+
+        vibration_g = float(vibration_rms or 0.0)
+        tilt_x = float(tilt_x or 0.0)
+        tilt_y = float(tilt_y or 0.0)
+        sw420_active = bool(int(sw420_event_count or 0))
+        current_trip_id = trip_id if trip_id is not None else (
+            self.trip.trip_id if self.trip.active else None
         )
-        terrain = self.check_terrain_stability(
-            gps_fix, gps_lat, gps_lon, gps_status,
-            tilt_x, tilt_y,
-            float(vibration_rms or 0.0), float(vibration_peak or 0.0),
-            sw420_event_count, machine_state, timestamp=timestamp
+
+        landslide_condition, new_landslide_event = self._update_landslide(
+            timestamp, point, vibration_g, tilt_x, tilt_y,
+            tilt_valid, sw420_active, machine_state, current_trip_id,
         )
-        trip_snapshot = self.trip.snapshot()
+        new_idle_event = self._update_idle(
+            now_monotonic, timestamp, point, sw420_active,
+            vibration_g, machine_state, current_trip_id,
+        )
+
+        idle_event = self._idle_event or self._idle_last_event
+        landslide_event = self._landslide_event
+        buzzer_pattern = "three" if new_landslide_event else (
+            "double" if new_idle_event and not landslide_condition and not self._landslide_latched else None
+        )
+        stationary_event = None
+        if self._idle_event is not None:
+            stationary_event = {
+                **self._idle_event,
+                "reason": self._idle_event["message"],
+            }
+        terrain_event = None
+        if self._landslide_latched and landslide_event is not None:
+            terrain_event = {
+                **landslide_event,
+                "severity": "POTENSI LONGSOR",
+                "trigger_reason": "heavy vibration and excessive tilt",
+            }
+
         return {
-            "stationary_vibration": stationary,
-            "terrain_stability": terrain,
-            "trip": trip_snapshot,
-            "gps_status": gps_status,
+            "idle_state": self._idle_state,
+            "idle_duration_s": round(max(0.0, now_monotonic - self._idle_started_monotonic), 1) if self._idle_started_monotonic is not None else 0.0,
+            "idle_event": idle_event,
+            "potential_landslide": landslide_event,
+            "stationary_vibration": stationary_event,
+            "terrain_stability": terrain_event,
+            "new_idle_event": new_idle_event,
+            "new_landslide_event": new_landslide_event,
+            "buzzer_pattern": buzzer_pattern,
+            "gps_status": "GPS_VALID" if point is not None else "GPS_NO_FIX",
             "last_valid_point": self._gps_last_valid,
+            "trip": self.trip.snapshot(),
         }
 
-    def start_trip(self, lat=None, lon=None):
-        self.trip.start_trip(lat, lon)
+    def start_trip(self, lat=None, lon=None, timestamp=None, gps_status="GPS_VALID"):
+        return self.trip.start_trip(lat, lon, timestamp=timestamp, gps_status=gps_status)
 
-    def end_trip(self, lat=None, lon=None):
-        self.trip.end_trip(lat, lon)
+    def end_trip(self, lat=None, lon=None, timestamp=None, gps_status=None):
+        return self.trip.end_trip(lat, lon, timestamp=timestamp, gps_status=gps_status)
 
-    def record_trip_point(self, lat, lon, timestamp=None):
-        self.trip.update_position(lat, lon, timestamp)
+    def record_trip_point(self, lat, lon, timestamp=None, gps_status="GPS_VALID"):
+        return self.trip.update_position(lat, lon, timestamp, gps_status=gps_status)
 
 
 if __name__ == "__main__":
     engine = SafetyEventEngine(base_dir=".")
-    event = engine.check_stationary_vibration(1, -6.2, 106.8, "GPS FIX AKTIF", 0.22, 0.33, 1, "ON", "2026-09-27T00:00:00")
-    print(event)
+    for second in range(6):
+        result = engine.update(
+            1, -6.2, 106.8, "GPS FIX AKTIF", 0.1, 0.1, 1, "ON", 0.0, 0.0,
+            now_monotonic=second,
+        )
+    print(result["idle_event"])
