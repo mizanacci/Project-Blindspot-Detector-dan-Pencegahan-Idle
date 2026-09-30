@@ -186,7 +186,7 @@ function renderSensorTambahan(data) {
       (idleState === "NORMAL" ? "NORMAL" : (data.status_idle || "\u2014")));
   document.getElementById("sensor-idle").textContent = belumAdaData ? "\u2014" : idleLabel;
   const idleDuration = idleState ? data.safety?.idle_duration_s : data.durasi_idle_s;
-  document.getElementById("sensor-durasi-idle").textContent = belumAdaData ? "--:--" : formatDurasi(idleDuration);
+  document.getElementById("sensor-durasi-idle").textContent = belumAdaData ? "--:--:--" : formatDurasiTrip(idleDuration);
   document.getElementById("sensor-getaran").textContent = belumAdaData ? "\u2014 g" : `${Number(data.getaran_g || 0).toFixed(3)} g`;
 
   const tiltX = belumAdaData ? 0 : Number(data.tilt_x_deg || 0);
@@ -257,7 +257,17 @@ function updateSummaryCards(data) {
   document.getElementById("blindspot-status").textContent = LABEL_STATUS[blindspot] || blindspot.toUpperCase();
 
   document.getElementById("machine-gps-status").textContent = data.gps_fix ? "FIX ACTIVE" : (data.gps_status || "MENUNGGU FIX");
-  document.getElementById("machine-stationary-duration").textContent = `${Number(data.safety?.stationary_vibration?.duration_s || 0).toFixed(0)} s`;
+  document.getElementById("machine-current-idle-duration").textContent = formatDurasiTrip(safety.idle_duration_s || 0);
+  document.getElementById("machine-total-idle-duration").textContent = formatDurasiTrip(safety.total_idle_duration_s || 0);
+  document.getElementById("machine-idle-sessions").textContent = safety.idle_session_count || 0;
+  document.getElementById("machine-idle-threshold").textContent = formatDurasiTrip(safety.thresholds?.idle_duration_s || 0);
+  document.getElementById("machine-idle-radius").textContent = `${Number(safety.thresholds?.idle_distance_m || 0).toFixed(1)} m`;
+  const geofence = safety.idle_geofence || {};
+  const geofenceStatus = !geofence.enabled ? "GEOFENCE NONAKTIF" :
+    !geofence.position_valid ? "MENUNGGU GPS FIX" :
+      geofence.inside ? "DI DALAM AREA BONGKAR MUAT — IDLE DINONAKTIFKAN" :
+        "DI LUAR AREA BONGKAR MUAT — DETEKSI IDLE AKTIF";
+  document.getElementById("machine-geofence-status").textContent = geofenceStatus;
   document.getElementById("machine-vibration").textContent = `${Number(data.getaran_g || 0).toFixed(3)} g`;
   const idleEvent = safety.idle_event;
   const landslideEvent = safety.potential_landslide;
@@ -296,9 +306,14 @@ function renderMap(data) {
   if (typeof window.L === "undefined") return;
   const mapContainer = document.getElementById("route-map");
   if (!mapContainer) return;
+  const geofence = data.safety?.idle_geofence || {};
+  const polygonPoints = Array.isArray(geofence.points) ? geofence.points
+    .filter((point) => point && Number.isFinite(Number(point.lat)) && Number.isFinite(Number(point.lon)))
+    .map((point) => [Number(point.lat), Number(point.lon)]) : [];
 
   if (!routeMap) {
-    routeMap = L.map("route-map", { zoomControl: true }).setView([-6.2, 106.8], 12);
+    const initialCenter = polygonPoints.length > 0 ? polygonPoints[0] : [-6.2, 106.8];
+    routeMap = L.map("route-map", { zoomControl: true }).setView(initialCenter, polygonPoints.length > 0 ? 17 : 12);
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
       maxZoom: 19,
       attribution: "&copy; OpenStreetMap contributors",
@@ -307,6 +322,14 @@ function renderMap(data) {
   }
 
   routeLayer.clearLayers();
+  if (geofence.enabled && polygonPoints.length >= 3) {
+    L.polygon(polygonPoints, {
+      color: "#4db6ff",
+      weight: 2,
+      fillColor: "#4db6ff",
+      fillOpacity: 0.16,
+    }).addTo(routeLayer).bindPopup(geofence.name || "Idle geofence");
+  }
   const points = Array.isArray(data.route_points) ? data.route_points : [];
   if (points.length > 1) {
     const latlngs = points.map((p) => [p.lat, p.lon]);

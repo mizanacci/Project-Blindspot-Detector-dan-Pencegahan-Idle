@@ -22,8 +22,10 @@ import time
 
 import cv2
 from flask import Flask, Response, jsonify, render_template, send_file
+from safety_event_engine import load_runtime_config
 
 _DASHBOARD_DIR = os.path.dirname(os.path.abspath(__file__))
+_SAFETY_CONFIG = load_runtime_config()
 app = Flask(
     __name__,
     template_folder=_DASHBOARD_DIR,
@@ -77,12 +79,40 @@ class SharedState:
             "idle_event": None,
             "idle_state": "NORMAL",
             "idle_duration_s": 0.0,
+            "total_idle_duration_s": 0.0,
+            "idle_session_count": 0,
+            "idle_geofence": {
+                "enabled": bool(_SAFETY_CONFIG.get("IDLE_GEOFENCE", {}).get("enabled", False)),
+                "inside": False,
+                "position_valid": False,
+                "name": _SAFETY_CONFIG.get("IDLE_GEOFENCE", {}).get("name", ""),
+                "bypass_idle": bool(_SAFETY_CONFIG.get("IDLE_GEOFENCE", {}).get("bypass_idle", False)),
+                "points": _SAFETY_CONFIG.get("IDLE_GEOFENCE", {}).get("points", []),
+            },
+            "idle_geofence_inside": False,
+            "idle_geofence_name": _SAFETY_CONFIG.get("IDLE_GEOFENCE", {}).get("name", ""),
+            "idle_detection_enabled": True,
+            "thresholds": {
+                "idle_duration_s": float(_SAFETY_CONFIG["IDLE_DURATION_THRESHOLD_S"]),
+                "idle_distance_m": float(_SAFETY_CONFIG["IDLE_DISTANCE_THRESHOLD_M"]),
+                "heavy_vibration_g": float(_SAFETY_CONFIG["HEAVY_VIBRATION_THRESHOLD"]),
+                "tilt_deg": float(_SAFETY_CONFIG["TILT_THRESHOLD_DEG"]),
+            },
             "potential_landslide": None,
             "new_idle_event": False,
             "new_landslide_event": False,
             "stationary_vibration": None,
             "terrain_stability": None,
-            "trip": {"active": False, "total_distance_km": 0.0, "track_points": 0},
+            "trip": {
+                "active": False,
+                "status": "WAITING_FIX",
+                "trip_id": None,
+                "start_time": None,
+                "end_time": None,
+                "duration_s": 0.0,
+                "total_distance_km": 0.0,
+                "track_points": 0,
+            },
             "gps_status": "MENUNGGU DATA",
             "last_valid_point": None,
         }
@@ -307,12 +337,40 @@ def status_endpoint():
         "idle_event": None,
         "idle_state": "NORMAL",
         "idle_duration_s": 0.0,
+        "total_idle_duration_s": 0.0,
+        "idle_session_count": 0,
+        "idle_geofence": {
+            "enabled": bool(_SAFETY_CONFIG.get("IDLE_GEOFENCE", {}).get("enabled", False)),
+            "inside": False,
+            "position_valid": False,
+            "name": _SAFETY_CONFIG.get("IDLE_GEOFENCE", {}).get("name", ""),
+            "bypass_idle": bool(_SAFETY_CONFIG.get("IDLE_GEOFENCE", {}).get("bypass_idle", False)),
+            "points": _SAFETY_CONFIG.get("IDLE_GEOFENCE", {}).get("points", []),
+        },
+        "idle_geofence_inside": False,
+        "idle_geofence_name": _SAFETY_CONFIG.get("IDLE_GEOFENCE", {}).get("name", ""),
+        "idle_detection_enabled": True,
+        "thresholds": {
+            "idle_duration_s": float(_SAFETY_CONFIG["IDLE_DURATION_THRESHOLD_S"]),
+            "idle_distance_m": float(_SAFETY_CONFIG["IDLE_DISTANCE_THRESHOLD_M"]),
+            "heavy_vibration_g": float(_SAFETY_CONFIG["HEAVY_VIBRATION_THRESHOLD"]),
+            "tilt_deg": float(_SAFETY_CONFIG["TILT_THRESHOLD_DEG"]),
+        },
         "potential_landslide": None,
         "new_idle_event": False,
         "new_landslide_event": False,
         "stationary_vibration": None,
         "terrain_stability": None,
-        "trip": {"active": False, "total_distance_km": 0.0, "track_points": 0},
+        "trip": {
+            "active": False,
+            "status": "WAITING_FIX",
+            "trip_id": None,
+            "start_time": None,
+            "end_time": None,
+            "duration_s": 0.0,
+            "total_distance_km": 0.0,
+            "track_points": 0,
+        },
         "gps_status": "MENUNGGU DATA",
         "last_valid_point": None,
     })

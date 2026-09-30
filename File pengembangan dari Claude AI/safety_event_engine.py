@@ -17,11 +17,17 @@ DEFAULT_CONFIG = {
     "VIBRATION_CRITICAL_RMS": 0.25,
     "TILT_DURATION_S": 8.0,
     "VIBRATION_DURATION_S": 8.0,
-    "IDLE_DURATION_THRESHOLD_S": 5.0,
-    "IDLE_DISTANCE_THRESHOLD_M": 2.0,
+    "IDLE_DURATION_THRESHOLD_S": 10.0,
+    "IDLE_DISTANCE_THRESHOLD_M": 1.5,
     "IDLE_LOG_UPDATE_INTERVAL_S": 30.0,
-    "HEAVY_VIBRATION_THRESHOLD": 0.25,
-    "TILT_THRESHOLD_DEG": 18.0,
+    "HEAVY_VIBRATION_THRESHOLD": 0.30,
+    "TILT_THRESHOLD_DEG": 15.0,
+    "IDLE_GEOFENCE": {
+        "enabled": False,
+        "name": "",
+        "bypass_idle": False,
+        "points": [],
+    },
 }
 
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "safety_config.json")
@@ -37,6 +43,46 @@ def load_runtime_config(path=CONFIG_PATH):
     except (FileNotFoundError, TypeError, ValueError, OSError):
         return config
     return config
+
+
+def is_point_inside_idle_geofence(latitude, longitude, polygon_points):
+    """Return True for a valid point inside or on the polygon boundary."""
+    try:
+        latitude = float(latitude)
+        longitude = float(longitude)
+    except (TypeError, ValueError):
+        return False
+    if not math.isfinite(latitude) or not math.isfinite(longitude):
+        return False
+    if not isinstance(polygon_points, (list, tuple)) or len(polygon_points) < 3:
+        return False
+
+    polygon = []
+    for item in polygon_points:
+        try:
+            point_lat = float(item["lat"])
+            point_lon = float(item["lon"])
+        except (TypeError, ValueError, KeyError):
+            return False
+        if not math.isfinite(point_lat) or not math.isfinite(point_lon):
+            return False
+        polygon.append((point_lat, point_lon))
+
+    inside = False
+    for index, (lat_a, lon_a) in enumerate(polygon):
+        lat_b, lon_b = polygon[index - 1]
+        cross = ((lon_a - longitude) * (lat_b - latitude) -
+             (lat_a - latitude) * (lon_b - longitude))
+        if (min(lat_a, lat_b) <= latitude <= max(lat_a, lat_b) and
+                min(lon_a, lon_b) <= longitude <= max(lon_a, lon_b) and
+                abs(cross) <= 1e-12):
+            return True
+        if ((lat_a > latitude) != (lat_b > latitude)):
+            crossing_lon = ((lon_b - lon_a) * (latitude - lat_a) /
+                            (lat_b - lat_a) + lon_a)
+            if longitude < crossing_lon:
+                inside = not inside
+    return inside
 
 
 class TripTracker:
@@ -320,6 +366,17 @@ class SafetyEventEngine:
         "tilt_reference_valid", "sw420_detected", "machine_state", "message",
         "trigger_reason",
     ]
+    STATIONARY_EVENT_FIELDS = [
+        "timestamp", "event_id", "event_type", "event_action", "duration_s",
+        "latitude", "longitude", "gps_status", "vibration_rms", "vibration_peak",
+        "sw420_event_count", "machine_state", "severity", "reason",
+    ]
+    TERRAIN_EVENT_FIELDS = [
+        "timestamp", "event_id", "event_type", "event_action", "duration_s",
+        "latitude", "longitude", "gps_status", "tilt_x", "tilt_y", "vibration_rms",
+        "vibration_peak", "sw420_event_count", "machine_state", "severity",
+        "trigger_reason",
+    ]
 
     def __init__(self, base_dir=".", config=None, clock=None):
         self.base_dir = base_dir
@@ -327,6 +384,7 @@ class SafetyEventEngine:
         if config:
             self.config.update(config)
         self._clock = clock or time.monotonic
+        self._idle_geofence = self.config.get("IDLE_GEOFENCE", {}) or {}
         self.trip = TripTracker(
             base_dir=base_dir,
             min_distance_m=self.config["IDLE_DISTANCE_THRESHOLD_M"],
@@ -339,8 +397,13 @@ class SafetyEventEngine:
         self._idle_event = None
         self._idle_last_event = None
         self._idle_last_log_monotonic = None
+        self._idle_geofence_inside = False
+        self._idle_geofence_position_valid = False
+        self._total_idle_duration_s = 0.0
+        self._idle_session_count = 0
         self._landslide_latched = False
         self._landslide_event = None
+        self._landslide_started_monotonic = None
         self._ensure_logs()
 
     def _ensure_logs(self):
@@ -356,21 +419,17 @@ class SafetyEventEngine:
             if os.path.exists(path):
                 if name == "log_safety_events.csv":
                     self._ensure_safety_event_schema(path)
+                elif name == "log_stationary_vibration.csv":
+                    self._ensure_event_log_schema(path, self.STATIONARY_EVENT_FIELDS)
+                elif name == "log_terrain_stability.csv":
+                    self._ensure_event_log_schema(path, self.TERRAIN_EVENT_FIELDS)
                 continue
             with open(path, "w", newline="") as handle:
                 writer = csv.writer(handle)
                 if name == "log_stationary_vibration.csv":
-                    writer.writerow([
-                        "timestamp", "event_id", "event_type", "duration_s", "latitude",
-                        "longitude", "gps_status", "vibration_rms", "vibration_peak",
-                        "sw420_event_count", "machine_state", "severity", "reason"
-                    ])
+                    writer.writerow(self.STATIONARY_EVENT_FIELDS)
                 elif name == "log_terrain_stability.csv":
-                    writer.writerow([
-                        "timestamp", "event_id", "event_type", "duration_s", "latitude",
-                        "longitude", "tilt_x", "tilt_y", "vibration_rms", "vibration_peak",
-                        "sw420_event_count", "machine_state", "severity", "trigger_reason"
-                    ])
+                    writer.writerow(self.TERRAIN_EVENT_FIELDS)
                 elif name == "log_blindspot.csv":
                     writer.writerow([
                         "timestamp", "event_id", "event_type", "severity", "person_count",
@@ -405,6 +464,28 @@ class SafetyEventEngine:
             if temporary_path is not None and os.path.exists(temporary_path):
                 os.unlink(temporary_path)
 
+    def _ensure_event_log_schema(self, path, required_fields):
+        temporary_path = None
+        try:
+            with open(path, newline="") as source:
+                reader = csv.DictReader(source)
+                existing_fields = reader.fieldnames or []
+                if existing_fields == required_fields:
+                    return
+                fields = list(required_fields)
+                fields.extend(field for field in existing_fields if field not in fields)
+                with tempfile.NamedTemporaryFile(
+                        "w", newline="", dir=self.base_dir, delete=False) as target:
+                    temporary_path = target.name
+                    writer = csv.DictWriter(target, fieldnames=fields)
+                    writer.writeheader()
+                    for row in reader:
+                        writer.writerow(row)
+            os.replace(temporary_path, path)
+        finally:
+            if temporary_path is not None and os.path.exists(temporary_path):
+                os.unlink(temporary_path)
+
     def _event_id(self, prefix="evt"):
         return f"{prefix}-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:6]}"
 
@@ -418,10 +499,80 @@ class SafetyEventEngine:
         a = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
         return 2 * 6371000.0 * math.asin(math.sqrt(a))
 
+    def _update_idle_geofence(self, point):
+        if point is None:
+            self._idle_geofence_position_valid = False
+            return self._idle_geofence_inside
+        self._idle_geofence_position_valid = True
+        if not self._idle_geofence.get("enabled", False):
+            self._idle_geofence_inside = False
+            return False
+        self._idle_geofence_inside = is_point_inside_idle_geofence(
+            point[0], point[1], self._idle_geofence.get("points", [])
+        )
+        return self._idle_geofence_inside
+
+    def _idle_geofence_snapshot(self):
+        return {
+            "enabled": bool(self._idle_geofence.get("enabled", False)),
+            "inside": bool(self._idle_geofence_inside) if self._idle_geofence_position_valid else False,
+            "last_valid_inside": bool(self._idle_geofence_inside),
+            "position_valid": bool(self._idle_geofence_position_valid),
+            "name": self._idle_geofence.get("name", ""),
+            "bypass_idle": bool(self._idle_geofence.get("bypass_idle", False)),
+            "points": list(self._idle_geofence.get("points", [])),
+        }
+
     def _write_csv(self, path_name, row):
         path = os.path.join(self.base_dir, path_name)
         with open(path, "a", newline="") as handle:
             csv.writer(handle).writerow(row)
+
+    def _write_specialized_event(self, event, action, timestamp,
+                                 end_point=None, gps_status=None,
+                                 duration_s=None):
+        location = end_point
+        if location is None and event.get("latitude") is not None and event.get("longitude") is not None:
+            location = (event["latitude"], event["longitude"])
+        location_status = gps_status or event.get("gps_status")
+        duration = round(
+            duration_s if duration_s is not None else event.get("duration_s", 0.0),
+            1,
+        )
+        common = {
+            "timestamp": timestamp,
+            "event_id": event.get("event_id"),
+            "event_type": event.get("event_type"),
+            "event_action": action,
+            "duration_s": duration,
+            "latitude": location[0] if location is not None else None,
+            "longitude": location[1] if location is not None else None,
+            "gps_status": location_status,
+            "vibration_rms": event.get("vibration_g"),
+            "vibration_peak": event.get("vibration_peak_g"),
+            "sw420_event_count": event.get("sw420_event_count"),
+            "machine_state": event.get("machine_state"),
+        }
+        if event.get("event_type") == "IDLE":
+            common.update({
+                "severity": event.get("severity"),
+                "reason": event.get("message"),
+            })
+            fields = self.STATIONARY_EVENT_FIELDS
+            filename = "log_stationary_vibration.csv"
+        elif event.get("event_type") == "POTENSI_LONGSOR":
+            common.update({
+                "gps_status": location_status,
+                "tilt_x": event.get("tilt_x_deg"),
+                "tilt_y": event.get("tilt_y_deg"),
+                "severity": event.get("severity", "POTENSI LONGSOR"),
+                "trigger_reason": event.get("trigger_reason"),
+            })
+            fields = self.TERRAIN_EVENT_FIELDS
+            filename = "log_terrain_stability.csv"
+        else:
+            return
+        self._write_csv(filename, [common.get(field) for field in fields])
 
     @staticmethod
     def _valid_gps_point(fix, latitude, longitude):
@@ -463,6 +614,10 @@ class SafetyEventEngine:
             event.get("message"),
             event.get("trigger_reason"),
         ])
+        self._write_specialized_event(
+            event, action, timestamp, end_point=end_point,
+            gps_status=gps_status, duration_s=duration_s,
+        )
 
     def _reset_idle_candidate(self):
         self._idle_state = "NORMAL"
@@ -492,11 +647,16 @@ class SafetyEventEngine:
                 gps_status=end_gps_status, duration_s=duration_s,
             )
             self._idle_last_event = dict(self._idle_event)
+            self._total_idle_duration_s += duration_s
         self._reset_idle_candidate()
 
     def _update_idle(self, now_monotonic, timestamp, point, sw420_active,
-                     vibration_g, machine_state, trip_id):
+                     vibration_g, vibration_peak, machine_state, trip_id,
+                     idle_detection_enabled=True):
         new_idle_event = False
+        if not idle_detection_enabled:
+            self._close_idle_session(now_monotonic, timestamp, point)
+            return False
         machine_state = str(machine_state).upper()
         machine_on = machine_state == "ON" or sw420_active
         machine_off = machine_state in {"MATI", "OFF", "STOP"}
@@ -540,13 +700,16 @@ class SafetyEventEngine:
                 "longitude": event_point[1] if event_point is not None else None,
                 "gps_status": event_gps_status,
                 "vibration_g": round(float(vibration_g), 4),
+                "vibration_peak_g": round(float(vibration_peak), 4),
                 "sw420_detected": bool(sw420_active),
+                "sw420_event_count": int(sw420_active),
                 "machine_state": machine_state,
                 "message": "SEGERA MATIKAN MESIN AGAR BAHAN BAKAR LEBIH HEMAT",
             }
             self._idle_last_log_monotonic = now_monotonic
             self._write_safety_event(self._idle_event, "START", timestamp, duration_s=duration_s)
             self._idle_last_event = dict(self._idle_event)
+            self._idle_session_count += 1
             new_idle_event = True
         elif self._idle_state == "IDLE_ACTIVE":
             if event_point is not None:
@@ -555,6 +718,7 @@ class SafetyEventEngine:
             self._idle_event["gps_status"] = event_gps_status
             self._idle_event["duration_s"] = round(duration_s, 1)
             self._idle_event["vibration_g"] = round(float(vibration_g), 4)
+            self._idle_event["vibration_peak_g"] = round(float(vibration_peak), 4)
             self._idle_event["machine_state"] = machine_state
             self._idle_last_event = dict(self._idle_event)
             if (now_monotonic - self._idle_last_log_monotonic >=
@@ -563,7 +727,8 @@ class SafetyEventEngine:
                 self._idle_last_log_monotonic = now_monotonic
         return new_idle_event
 
-    def _update_landslide(self, timestamp, point, vibration_g, tilt_x, tilt_y,
+    def _update_landslide(self, now_monotonic, timestamp, point, vibration_g,
+                          vibration_peak, tilt_x, tilt_y,
                           tilt_valid, sw420_active, machine_state, trip_id):
         vibration_threshold = float(self.config["HEAVY_VIBRATION_THRESHOLD"])
         tilt_threshold = float(self.config["TILT_THRESHOLD_DEG"])
@@ -583,6 +748,7 @@ class SafetyEventEngine:
 
         if condition and not self._landslide_latched:
             self._landslide_latched = True
+            self._landslide_started_monotonic = now_monotonic
             self._landslide_event = {
                 "event_id": self._event_id("landslide"),
                 "trip_id": trip_id,
@@ -593,6 +759,7 @@ class SafetyEventEngine:
                 "longitude": point[1] if point is not None else None,
                 "gps_status": "GPS_VALID" if point is not None else "NO_FIX",
                 "vibration_g": round(float(vibration_g), 4),
+                "vibration_peak_g": round(float(vibration_peak), 4),
                 "vibration_threshold_g": vibration_threshold,
                 "tilt_deg": round(tilt_deg, 2),
                 "tilt_threshold_deg": tilt_threshold,
@@ -600,9 +767,11 @@ class SafetyEventEngine:
                 "tilt_y_deg": round(float(tilt_y), 2),
                 "tilt_reference_valid": bool(tilt_valid),
                 "sw420_detected": bool(sw420_active),
+                "sw420_event_count": int(sw420_active),
                 "machine_state": machine_state,
                 "message": "POTENSI LONGSOR TERDETEKSI",
                 "trigger_reason": trigger_reason,
+                "severity": "POTENSI LONGSOR",
             }
             self._write_safety_event(self._landslide_event, "DETECTED", timestamp)
             new_event = True
@@ -610,7 +779,11 @@ class SafetyEventEngine:
             self._landslide_latched = False
             self._landslide_event["active"] = False
             self._landslide_event["timestamp_end"] = timestamp
-            self._write_safety_event(self._landslide_event, "CLEARED", timestamp)
+            duration_s = max(0.0, now_monotonic - self._landslide_started_monotonic)
+            self._landslide_event["duration_s"] = round(duration_s, 1)
+            self._write_safety_event(self._landslide_event, "CLEARED", timestamp,
+                                     duration_s=duration_s)
+            self._landslide_started_monotonic = None
 
         return condition, new_event
 
@@ -620,6 +793,13 @@ class SafetyEventEngine:
         point = self._valid_gps_point(gps_fix, gps_lat, gps_lon)
         if point is not None:
             self._gps_last_valid = point
+        idle_geofence_last_inside = self._update_idle_geofence(point)
+        idle_geofence_inside = idle_geofence_last_inside if point is not None else False
+        idle_geofence_bypass = (
+            idle_geofence_last_inside and
+            bool(self._idle_geofence.get("enabled", False)) and
+            bool(self._idle_geofence.get("bypass_idle", False))
+        )
 
         vibration_g = float(vibration_rms or 0.0)
         tilt_x = float(tilt_x or 0.0)
@@ -630,12 +810,14 @@ class SafetyEventEngine:
         )
 
         landslide_condition, new_landslide_event = self._update_landslide(
-            timestamp, point, vibration_g, tilt_x, tilt_y,
+            now_monotonic, timestamp, point, vibration_g, vibration_peak,
+            tilt_x, tilt_y,
             tilt_valid, sw420_active, machine_state, current_trip_id,
         )
         new_idle_event = self._update_idle(
             now_monotonic, timestamp, point, sw420_active,
-            vibration_g, machine_state, current_trip_id,
+            vibration_g, vibration_peak, machine_state, current_trip_id,
+            idle_detection_enabled=not idle_geofence_bypass,
         )
 
         idle_event = self._idle_event or self._idle_last_event
@@ -656,9 +838,29 @@ class SafetyEventEngine:
                 "severity": "POTENSI LONGSOR",
             }
 
+        current_idle_duration_s = (
+            max(0.0, now_monotonic - self._idle_started_monotonic)
+            if self._idle_started_monotonic is not None else 0.0
+        )
+        total_idle_duration_s = self._total_idle_duration_s
+        if self._idle_state == "IDLE_ACTIVE":
+            total_idle_duration_s += current_idle_duration_s
+
         return {
             "idle_state": self._idle_state,
-            "idle_duration_s": round(max(0.0, now_monotonic - self._idle_started_monotonic), 1) if self._idle_started_monotonic is not None else 0.0,
+            "idle_duration_s": round(current_idle_duration_s, 1),
+            "total_idle_duration_s": round(total_idle_duration_s, 1),
+            "idle_session_count": self._idle_session_count,
+            "idle_geofence": self._idle_geofence_snapshot(),
+            "idle_geofence_inside": idle_geofence_inside,
+            "idle_geofence_name": self._idle_geofence.get("name", ""),
+            "idle_detection_enabled": not idle_geofence_bypass,
+            "thresholds": {
+                "idle_duration_s": float(self.config["IDLE_DURATION_THRESHOLD_S"]),
+                "idle_distance_m": float(self.config["IDLE_DISTANCE_THRESHOLD_M"]),
+                "heavy_vibration_g": float(self.config["HEAVY_VIBRATION_THRESHOLD"]),
+                "tilt_deg": float(self.config["TILT_THRESHOLD_DEG"]),
+            },
             "idle_event": idle_event,
             "potential_landslide": landslide_event,
             "stationary_vibration": stationary_event,

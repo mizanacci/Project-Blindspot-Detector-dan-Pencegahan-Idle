@@ -7,9 +7,21 @@
   "VIBRATION_CRITICAL_RMS": 0.25,
   "TILT_DURATION_S": 8.0,
   "VIBRATION_DURATION_S": 8.0,
-  "IDLE_DURATION_THRESHOLD_S": 5.0,
-  "IDLE_DISTANCE_THRESHOLD_M": 2.0,
+  "IDLE_DURATION_THRESHOLD_S": 10.0,
+  "IDLE_DISTANCE_THRESHOLD_M": 1.5,
   "IDLE_LOG_UPDATE_INTERVAL_S": 30.0,
-  "HEAVY_VIBRATION_THRESHOLD": 0.25,
-  "TILT_THRESHOLD_DEG": 18.0
+  "HEAVY_VIBRATION_THRESHOLD": 0.30,
+  "TILT_THRESHOLD_DEG": 15.0,
+  "IDLE_GEOFENCE": {
+    "enabled": true,
+    "name": "Area Bongkar Muat Balikpapan",
+    "bypass_idle": true,
+    "points": [
+      {"lat": -1.27610, "lon": 116.86275},
+      {"lat": -1.27605, "lon": 116.86320},
+      {"lat": -1.27635, "lon": 116.86335},
+      {"lat": -1.27670, "lon": 116.86315},
+      {"lat": -1.27670, "lon": 116.86275}
+    ]
+  }
 }

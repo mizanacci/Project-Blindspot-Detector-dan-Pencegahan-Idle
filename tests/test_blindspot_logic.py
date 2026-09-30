@@ -10,6 +10,7 @@ from fuzzy_engine import evaluate_urgency, StatusStabilizer
 from tracker import SimpleTracker
 from mpu6050_sensor import MPU6050Sensor
 from gps_neo6m import GPSNeo6M
+from safety_event_engine import is_point_inside_idle_geofence, load_runtime_config
 import main
 
 
@@ -415,9 +416,9 @@ def test_idle_and_landslide_events_are_linked_to_active_trip_id():
         trip = engine.start_trip(-6.2, 106.8, timestamp="2026-09-29T08:00:00")
         trip_id = trip["trip_id"]
 
-        for second in range(6):
+        for second in range(11):
             _update_safety_engine(engine, second, vibration=0.1)
-        result = _update_safety_engine(engine, 5, vibration=0.3, tilt_x=20)
+        result = _update_safety_engine(engine, 11, vibration=0.31, tilt_x=20)
         assert result["idle_event"]["trip_id"] == trip_id
         assert result["potential_landslide"]["trip_id"] == trip_id
 
@@ -496,6 +497,112 @@ def _update_safety_engine(engine, now, *, fix=1, lat=-6.2, lon=106.8,
     )
 
 
+TEST_IDLE_GEOFENCE = {
+    "enabled": True,
+    "name": "Test Bongkar Muat",
+    "bypass_idle": True,
+    "points": [
+        {"lat": -6.2001, "lon": 106.7999},
+        {"lat": -6.2001, "lon": 106.8001},
+        {"lat": -6.1999, "lon": 106.8001},
+        {"lat": -6.1999, "lon": 106.7999},
+    ],
+}
+
+
+def _geofence_engine(directory):
+    return main.SafetyEventEngine(
+        base_dir=directory,
+        config={"IDLE_GEOFENCE": TEST_IDLE_GEOFENCE},
+    )
+
+
+def test_idle_geofence_point_in_polygon_handles_inside_outside_boundary_and_nofix():
+    points = TEST_IDLE_GEOFENCE["points"]
+    assert is_point_inside_idle_geofence(-6.2, 106.8, points)
+    assert not is_point_inside_idle_geofence(-6.2, 106.801, points)
+    assert is_point_inside_idle_geofence(-6.2001, 106.8, points)
+    assert not is_point_inside_idle_geofence(None, 106.8, points)
+
+
+def test_active_geofence_configuration_contains_new_balakpapan_center():
+    config = load_runtime_config()
+    geofence = config["IDLE_GEOFENCE"]
+    center = (-1.2763828609586374, 116.86299109402113)
+    assert geofence["name"] == "Area Bongkar Muat Balikpapan"
+    assert len(geofence["points"]) == 5
+    assert is_point_inside_idle_geofence(center[0], center[1], geofence["points"])
+    assert not is_point_inside_idle_geofence(-1.28, 116.87, geofence["points"])
+
+
+def test_idle_is_disabled_inside_geofence_without_creating_event():
+    with tempfile.TemporaryDirectory() as directory:
+        engine = _geofence_engine(directory)
+        for second in range(12):
+            result = _update_safety_engine(engine, second, lat=-6.2, lon=106.8)
+        assert result["idle_geofence_inside"] is True
+        assert result["idle_geofence_name"] == "Test Bongkar Muat"
+        assert result["idle_detection_enabled"] is False
+        assert result["idle_state"] == "NORMAL"
+        assert result["new_idle_event"] is False
+        assert result["idle_event"] is None
+
+
+def test_entering_geofence_closes_active_idle_session():
+    with tempfile.TemporaryDirectory() as directory:
+        engine = _geofence_engine(directory)
+        for second in range(11):
+            result = _update_safety_engine(engine, second, lon=106.801)
+        assert result["idle_state"] == "IDLE_ACTIVE"
+        result = _update_safety_engine(engine, 12, lon=106.8)
+        assert result["idle_geofence_inside"] is True
+        assert result["idle_state"] == "NORMAL"
+        assert result["idle_event"]["active"] is False
+        assert result["idle_event"]["timestamp_end"] == "2026-09-29T00:00:12"
+
+
+def test_idle_restarts_from_zero_after_exiting_geofence():
+    with tempfile.TemporaryDirectory() as directory:
+        engine = _geofence_engine(directory)
+        result = _update_safety_engine(engine, 0, lat=-6.2, lon=106.8)
+        assert result["idle_state"] == "NORMAL"
+        result = _update_safety_engine(engine, 1, lon=106.801)
+        assert result["idle_geofence_inside"] is False
+        assert result["idle_state"] == "IDLE_CANDIDATE"
+        result = _update_safety_engine(engine, 10, lon=106.801)
+        assert result["new_idle_event"] is False
+        result = _update_safety_engine(engine, 11, lon=106.801)
+        assert result["new_idle_event"] is True
+        assert result["idle_state"] == "IDLE_ACTIVE"
+
+
+def test_geofence_nofix_does_not_claim_inside_or_force_exit():
+    with tempfile.TemporaryDirectory() as directory:
+        engine = _geofence_engine(directory)
+        result = _update_safety_engine(engine, 0, fix=0, lat=None, lon=None)
+        assert result["idle_geofence_inside"] is False
+        assert result["idle_geofence"]["position_valid"] is False
+        assert result["idle_detection_enabled"] is True
+        result = _update_safety_engine(engine, 1, lon=106.8)
+        assert result["idle_geofence_inside"] is True
+        result = _update_safety_engine(engine, 2, fix=0, lat=None, lon=None)
+        assert result["idle_geofence_inside"] is False
+        assert result["idle_geofence"]["last_valid_inside"] is True
+        assert result["idle_geofence"]["position_valid"] is False
+        assert result["idle_state"] == "NORMAL"
+
+
+def test_crossing_geofence_does_not_create_idle_event():
+    with tempfile.TemporaryDirectory() as directory:
+        engine = _geofence_engine(directory)
+        result = _update_safety_engine(engine, 0, lon=106.801)
+        assert result["idle_state"] == "IDLE_CANDIDATE"
+        result = _update_safety_engine(engine, 1, lon=106.8)
+        assert result["idle_geofence_inside"] is True
+        assert result["idle_state"] == "NORMAL"
+        assert result["new_idle_event"] is False
+
+
 def test_idle_candidate_survives_gps_no_fix_before_threshold():
     with tempfile.TemporaryDirectory() as directory:
         engine = main.SafetyEventEngine(base_dir=directory)
@@ -511,7 +618,9 @@ def test_idle_candidate_survives_gps_no_fix_before_threshold():
         assert engine._idle_started_monotonic == started
         result = _update_safety_engine(engine, 3)
         assert result["new_idle_event"] is False
-        result = _update_safety_engine(engine, 6)
+        result = _update_safety_engine(engine, 9)
+        assert result["new_idle_event"] is False
+        result = _update_safety_engine(engine, 11)
         assert result["new_idle_event"] is True
         assert result["idle_state"] == "IDLE_ACTIVE"
         assert result["buzzer_pattern"] == "double"
@@ -521,22 +630,22 @@ def test_idle_candidate_survives_gps_no_fix_before_threshold():
 def test_active_idle_survives_gps_no_fix_and_fix_recovery():
     with tempfile.TemporaryDirectory() as directory:
         engine = main.SafetyEventEngine(base_dir=directory)
-        for second in range(6):
+        for second in range(11):
             result = _update_safety_engine(engine, second)
         assert result["idle_state"] == "IDLE_ACTIVE"
         started = engine._idle_started_monotonic
 
-        result = _update_safety_engine(engine, 10, fix=0)
+        result = _update_safety_engine(engine, 15, fix=0)
         assert result["idle_state"] == "IDLE_ACTIVE"
         assert result["idle_event"]["active"] is True
-        assert result["idle_duration_s"] == 10.0
+        assert result["idle_duration_s"] == 15.0
         assert engine._idle_started_monotonic == started
         assert result["new_idle_event"] is False
         assert result["buzzer_pattern"] is None
 
-        result = _update_safety_engine(engine, 15, lat=-6.199995)
+        result = _update_safety_engine(engine, 20, lat=-6.199995)
         assert result["idle_state"] == "IDLE_ACTIVE"
-        assert result["idle_duration_s"] == 15.0
+        assert result["idle_duration_s"] == 20.0
         assert result["new_idle_event"] is False
         assert result["idle_event"]["gps_status"] == "GPS_VALID"
 
@@ -544,7 +653,7 @@ def test_active_idle_survives_gps_no_fix_and_fix_recovery():
 def test_idle_uses_machine_state_even_without_sw420_signal():
     with tempfile.TemporaryDirectory() as directory:
         engine = main.SafetyEventEngine(base_dir=directory)
-        for second in range(6):
+        for second in range(11):
             result = _update_safety_engine(
                 engine, second, sw420=False, machine_state="ON",
             )
@@ -577,59 +686,59 @@ def test_idle_logs_start_updates_and_end_once_with_final_duration():
             base_dir=directory,
             config={"IDLE_LOG_UPDATE_INTERVAL_S": 2.0},
         )
-        for second in range(6):
+        for second in range(11):
             result = _update_safety_engine(engine, second)
         assert result["buzzer_pattern"] == "double"
 
-        result = _update_safety_engine(engine, 6)
+        result = _update_safety_engine(engine, 12)
         assert result["buzzer_pattern"] is None
-        result = _update_safety_engine(engine, 8)
+        result = _update_safety_engine(engine, 14)
         assert result["buzzer_pattern"] is None
-        result = _update_safety_engine(engine, 9, sw420=False)
+        result = _update_safety_engine(engine, 15, sw420=False)
         assert result["idle_state"] == "NORMAL"
         assert result["idle_event"]["active"] is False
-        assert result["idle_event"]["duration_s"] == 9.0
+        assert result["idle_event"]["duration_s"] == 15.0
 
         with open(os.path.join(directory, "log_safety_events.csv"), newline="") as handle:
             rows = list(csv.DictReader(handle))
         idle_rows = [row for row in rows if row["event_type"] == "IDLE"]
-        assert [row["event_action"] for row in idle_rows] == ["START", "UPDATE", "END"]
-        assert idle_rows[-1]["duration_s"] == "9.0"
-        assert idle_rows[-1]["timestamp_end"] == "2026-09-29T00:00:09"
+        assert [row["event_action"] for row in idle_rows] == ["START", "UPDATE", "UPDATE", "END"]
+        assert idle_rows[-1]["duration_s"] == "15.0"
+        assert idle_rows[-1]["timestamp_end"] == "2026-09-29T00:00:15"
         assert idle_rows[-1]["gps_status"] == "GPS_VALID"
 
 
 def test_active_idle_closes_on_machine_off_after_gps_no_fix():
     with tempfile.TemporaryDirectory() as directory:
         engine = main.SafetyEventEngine(base_dir=directory)
-        for second in range(6):
+        for second in range(11):
             result = _update_safety_engine(engine, second)
         assert result["idle_state"] == "IDLE_ACTIVE"
 
-        result = _update_safety_engine(engine, 6, fix=0)
+        result = _update_safety_engine(engine, 15, fix=0)
         assert result["idle_state"] == "IDLE_ACTIVE"
-        result = _update_safety_engine(engine, 8, fix=0, sw420=False, machine_state="MATI")
+        result = _update_safety_engine(engine, 20, fix=0, sw420=False, machine_state="MATI")
         assert result["idle_state"] == "NORMAL"
         assert result["idle_event"]["active"] is False
         assert result["idle_event"]["end_latitude"] == -6.2
         assert result["idle_event"]["end_longitude"] == 106.8
         assert result["idle_event"]["gps_status"] == "LAST_VALID_POINT"
-        assert result["idle_event"]["duration_s"] == 8.0
+        assert result["idle_event"]["duration_s"] == 20.0
 
 
 def test_active_idle_ends_when_gps_returns_outside_reference_radius():
     with tempfile.TemporaryDirectory() as directory:
         engine = main.SafetyEventEngine(base_dir=directory)
-        for second in range(6):
+        for second in range(11):
             _update_safety_engine(engine, second)
 
-        result = _update_safety_engine(engine, 10, fix=0)
+        result = _update_safety_engine(engine, 15, fix=0)
         assert result["idle_state"] == "IDLE_ACTIVE"
-        result = _update_safety_engine(engine, 11, lat=-6.1998)
+        result = _update_safety_engine(engine, 16, lat=-6.1998)
         assert result["idle_state"] == "NORMAL"
         assert result["idle_event"]["active"] is False
-        assert result["idle_event"]["timestamp_end"] == "2026-09-29T00:00:11"
-        assert result["idle_event"]["duration_s"] == 11.0
+        assert result["idle_event"]["timestamp_end"] == "2026-09-29T00:00:16"
+        assert result["idle_event"]["duration_s"] == 16.0
         assert result["idle_event"]["gps_status"] == "GPS_VALID"
 
 
@@ -639,10 +748,10 @@ def test_idle_can_start_without_gps_and_uses_first_fix_as_reference():
         result = _update_safety_engine(engine, 0, fix=0)
         assert result["idle_state"] == "IDLE_CANDIDATE"
         assert result["idle_event"] is None
-        for second in range(1, 5):
+        for second in range(1, 10):
             result = _update_safety_engine(engine, second, fix=0)
         assert result["new_idle_event"] is False
-        result = _update_safety_engine(engine, 5, lat=-6.2, lon=106.8)
+        result = _update_safety_engine(engine, 10, lat=-6.2, lon=106.8)
         assert result["new_idle_event"] is True
         assert result["idle_event"]["latitude"] == -6.2
         assert result["idle_event"]["longitude"] == 106.8
@@ -653,7 +762,7 @@ def test_idle_no_fix_never_logs_zero_coordinates():
 
     with tempfile.TemporaryDirectory() as directory:
         engine = main.SafetyEventEngine(base_dir=directory)
-        for second in range(6):
+        for second in range(11):
             result = _update_safety_engine(engine, second, fix=0)
         assert result["idle_event"]["latitude"] is None
         assert result["idle_event"]["longitude"] is None
@@ -666,12 +775,62 @@ def test_idle_no_fix_never_logs_zero_coordinates():
         assert row["gps_status"] == "NO_FIX"
 
 
+def test_total_idle_duration_accumulates_completed_and_active_sessions():
+    with tempfile.TemporaryDirectory() as directory:
+        engine = main.SafetyEventEngine(base_dir=directory)
+        for second in range(11):
+            result = _update_safety_engine(engine, second)
+        assert result["idle_session_count"] == 1
+        assert result["total_idle_duration_s"] == 10.0
+
+        result = _update_safety_engine(engine, 12, sw420=False)
+        assert result["idle_state"] == "NORMAL"
+        assert result["total_idle_duration_s"] == 12.0
+
+        for second in range(13, 25):
+            result = _update_safety_engine(engine, second)
+        assert result["idle_session_count"] == 2
+        assert result["idle_duration_s"] == 11.0
+        assert result["total_idle_duration_s"] == 23.0
+
+
+def test_specialized_logs_share_master_event_ids_and_lifecycle_actions():
+    import csv
+
+    with tempfile.TemporaryDirectory() as directory:
+        engine = main.SafetyEventEngine(
+            base_dir=directory,
+            config={"IDLE_LOG_UPDATE_INTERVAL_S": 3.0},
+        )
+        for second in range(11):
+            _update_safety_engine(engine, second, vibration=0.1)
+        _update_safety_engine(engine, 12, vibration=0.31, tilt_x=20)
+        _update_safety_engine(engine, 14, vibration=0.1, tilt_x=0)
+        _update_safety_engine(engine, 15, vibration=0.1, tilt_x=0, sw420=False)
+
+        def read_rows(filename):
+            with open(os.path.join(directory, filename), newline="") as handle:
+                return list(csv.DictReader(handle))
+
+        master = read_rows("log_safety_events.csv")
+        idle = read_rows("log_stationary_vibration.csv")
+        terrain = read_rows("log_terrain_stability.csv")
+        master_idle = [row for row in master if row["event_type"] == "IDLE"]
+        master_terrain = [row for row in master if row["event_type"] == "POTENSI_LONGSOR"]
+
+        assert [row["event_action"] for row in idle] == ["START", "UPDATE", "END"]
+        assert {row["event_id"] for row in idle} == {row["event_id"] for row in master_idle}
+        assert [row["event_action"] for row in terrain] == ["DETECTED", "CLEARED"]
+        assert {row["event_id"] for row in terrain} == {row["event_id"] for row in master_terrain}
+        assert terrain[0]["trigger_reason"] == "GETARAN DAN KEMIRINGAN MELEBIHI THRESHOLD"
+
+
 def test_potential_landslide_uses_either_threshold_and_latches_until_normal():
     with tempfile.TemporaryDirectory() as directory:
         engine = main.SafetyEventEngine(base_dir=directory)
 
         assert not _update_safety_engine(engine, 0, vibration=0.1, tilt_x=5)["new_landslide_event"]
-        result = _update_safety_engine(engine, 1, vibration=0.3, tilt_x=5)
+        result = _update_safety_engine(engine, 1, vibration=0.31, tilt_x=5)
         assert result["new_landslide_event"] is True
         assert result["potential_landslide"]["trigger_reason"] == "GETARAN MELEBIHI THRESHOLD"
         _update_safety_engine(engine, 2, vibration=0.1, tilt_x=5)
@@ -680,22 +839,22 @@ def test_potential_landslide_uses_either_threshold_and_latches_until_normal():
         assert result["new_landslide_event"] is True
         assert result["potential_landslide"]["trigger_reason"] == "KEMIRINGAN MELEBIHI THRESHOLD"
         _update_safety_engine(engine, 4, vibration=0.1, tilt_x=5)
-        result = _update_safety_engine(engine, 5, vibration=0.3, tilt_x=20)
+        result = _update_safety_engine(engine, 5, vibration=0.31, tilt_x=20)
         assert result["new_landslide_event"] is True
         assert result["buzzer_pattern"] == "three"
         event = result["potential_landslide"]
         assert event["event_type"] == "POTENSI_LONGSOR"
         assert event["latitude"] == -6.2
         assert event["longitude"] == 106.8
-        assert event["vibration_threshold_g"] == 0.25
-        assert event["tilt_threshold_deg"] == 18.0
+        assert event["vibration_threshold_g"] == 0.30
+        assert event["tilt_threshold_deg"] == 15.0
         assert event["trigger_reason"] == "GETARAN DAN KEMIRINGAN MELEBIHI THRESHOLD"
 
-        result = _update_safety_engine(engine, 4, vibration=0.3, tilt_x=20)
+        result = _update_safety_engine(engine, 4, vibration=0.31, tilt_x=20)
         assert result["new_landslide_event"] is False
         assert result["buzzer_pattern"] is None
         _update_safety_engine(engine, 5, vibration=0.1, tilt_x=5)
-        result = _update_safety_engine(engine, 6, vibration=0.3, tilt_x=20)
+        result = _update_safety_engine(engine, 6, vibration=0.31, tilt_x=20)
         assert result["new_landslide_event"] is True
         assert result["buzzer_pattern"] == "three"
 
@@ -706,7 +865,7 @@ def test_potential_landslide_logs_null_coordinates_without_gps_fix():
     with tempfile.TemporaryDirectory() as directory:
         engine = main.SafetyEventEngine(base_dir=directory)
         result = _update_safety_engine(
-            engine, 0, fix=0, lat=-6.2, lon=106.8, vibration=0.3, tilt_y=-19,
+            engine, 0, fix=0, lat=-6.2, lon=106.8, vibration=0.31, tilt_y=-19,
         )
         event = result["potential_landslide"]
         assert result["new_landslide_event"] is True
@@ -730,8 +889,8 @@ def test_potential_landslide_respects_tilt_reference_but_allows_vibration_only()
             gps_lat=-6.2,
             gps_lon=106.8,
             gps_status="GPS FIX AKTIF",
-            vibration_rms=0.3,
-            vibration_peak=0.3,
+            vibration_rms=0.31,
+            vibration_peak=0.31,
             sw420_event_count=1,
             machine_state="ON",
             tilt_x=30.0,
@@ -747,8 +906,8 @@ def test_potential_landslide_respects_tilt_reference_but_allows_vibration_only()
             gps_lat=-6.2,
             gps_lon=106.8,
             gps_status="GPS FIX AKTIF",
-            vibration_rms=0.3,
-            vibration_peak=0.3,
+            vibration_rms=0.31,
+            vibration_peak=0.31,
             sw420_event_count=1,
             machine_state="ON",
             tilt_x=30.0,
@@ -775,14 +934,46 @@ def test_potential_landslide_respects_tilt_reference_but_allows_vibration_only()
         assert result["potential_landslide"]["active"] is False
 
 
+def test_tuned_threshold_boundaries():
+    with tempfile.TemporaryDirectory() as directory:
+        engine = main.SafetyEventEngine(base_dir=directory)
+        result = _update_safety_engine(engine, 0, vibration=0.30, tilt_x=0.0)
+        assert result["new_landslide_event"] is False
+        result = _update_safety_engine(engine, 1, vibration=0.31, tilt_x=0.0)
+        assert result["new_landslide_event"] is True
+        assert result["potential_landslide"]["trigger_reason"] == "GETARAN MELEBIHI THRESHOLD"
+
+    with tempfile.TemporaryDirectory() as directory:
+        engine = main.SafetyEventEngine(base_dir=directory)
+        result = _update_safety_engine(engine, 0, vibration=0.1, tilt_x=13.0)
+        assert result["new_landslide_event"] is False
+        result = _update_safety_engine(engine, 1, vibration=0.1, tilt_x=15.0)
+        assert result["new_landslide_event"] is False
+        result = _update_safety_engine(engine, 2, vibration=0.1, tilt_x=15.1)
+        assert result["new_landslide_event"] is True
+        assert result["potential_landslide"]["trigger_reason"] == "KEMIRINGAN MELEBIHI THRESHOLD"
+
+
+def test_idle_activation_boundary_is_ten_seconds():
+    with tempfile.TemporaryDirectory() as directory:
+        engine = main.SafetyEventEngine(base_dir=directory)
+        for second in range(8):
+            result = _update_safety_engine(engine, second)
+        assert result["idle_state"] == "IDLE_CANDIDATE"
+        assert result["new_idle_event"] is False
+        result = _update_safety_engine(engine, 10)
+        assert result["idle_state"] == "IDLE_ACTIVE"
+        assert result["new_idle_event"] is True
+
+
 def test_landslide_buzzer_pattern_has_priority_over_idle_pattern():
     with tempfile.TemporaryDirectory() as directory:
         engine = main.SafetyEventEngine(base_dir=directory)
-        for second in range(5):
+        for second in range(10):
             result = _update_safety_engine(engine, second, vibration=0.1)
             assert result["buzzer_pattern"] is None
 
-        result = _update_safety_engine(engine, 5, vibration=0.3, tilt_x=20)
+        result = _update_safety_engine(engine, 10, vibration=0.31, tilt_x=20)
         assert result["new_idle_event"] is True
         assert result["new_landslide_event"] is True
         assert result["buzzer_pattern"] == "three"
